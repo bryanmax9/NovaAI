@@ -1,0 +1,16 @@
+{
+  "name": "robot-widget",
+  "version": "1.0.0",
+  "description": "Sci-fi worker robot desktop widget",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron . --no-sandbox --disable-gpu-sandbox --enable-transparent-visuals --enable-logging"
+  },
+  "dependencies": {
+    "three": "^0.163.0",
+    "vosk-browser": "^0.0.8"
+  },
+  "devDependencies": {
+    "electron": "^29.1.0"
+  }
+}
