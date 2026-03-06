@@ -310,37 +310,120 @@ animate();
 // ── TTS & Offline Voice Recognition (VOSK) ─────────────────────────────────
 let currentAudio = null;
 let recognizer = null;
+const API_KEY = window.require('dotenv').config().parsed.GROK_API_KEY;
 
-async function speak(text) {
-  if (currentAudio) {
-    currentAudio.pause();
-    currentAudio.currentTime = 0;
-  }
-  try {
-    const audioPath = await ipcRenderer.invoke('generate-speech', text);
-    if (audioPath) {
-      const fullPath = path.resolve(__dirname, audioPath);
-      const buffer = fs.readFileSync(fullPath);
-      const base64 = buffer.toString('base64');
-      currentAudio = new Audio('data:audio/wav;base64,' + base64);
-      currentAudio.playbackRate = 1.0; 
-      currentAudio.play().catch(e => console.error("Audio block reasoning:", e.name, e.message));
+// Base64 PCM16 continuous playback
+let grokAudioContext = new window.AudioContext({ sampleRate: 24000 });
+let nextPlayTime = 0;
+
+function playAudioChunk(base64Audio) {
+    if (grokAudioContext.state === 'suspended') grokAudioContext.resume();
+    
+    const binaryString = window.atob(base64Audio);
+    const len = binaryString.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
     }
-  } catch(e) { console.error("TTS Piper failed", e); }
+    const int16 = new Int16Array(bytes.buffer);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) {
+        float32[i] = int16[i] / 32768.0;
+    }
+
+    const audioBuffer = grokAudioContext.createBuffer(1, float32.length, 24000);
+    audioBuffer.getChannelData(0).set(float32);
+
+    const source = grokAudioContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(grokAudioContext.destination);
+
+    if (nextPlayTime < grokAudioContext.currentTime) {
+        nextPlayTime = grokAudioContext.currentTime;
+    }
+    source.start(nextPlayTime);
+    nextPlayTime += audioBuffer.duration;
 }
 
-const robotResponses = [
-  "Affirmative. Processing your request now.",
-  "My sensors indicate that information is correct.",
-  "I am currently optimizing local algorithms.",
-  "Negative. That action violates my core directives.",
-  "Scanning environment... All systems nominal.",
-  "I am a worker robot, not a philosopher.",
-  "Command acknowledged. Executing background tasks.",
-  "Energy reserves are optimal. Ready to proceed.",
-  "I have calculated the odds, and they are in our favor.",
-  "Task added to my queue. I will process it shortly."
-];
+// Websocket Realtime Connection
+let grokSocket = null;
+
+async function initGrokSocket() {
+    try {
+        const response = await fetch("https://api.x.ai/v1/realtime/client_secrets", {
+            method: 'POST',
+            headers: {
+                "Authorization": `Bearer ${API_KEY}`,
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ "expires_after": { "seconds": 3600 } })
+        });
+        const data = await response.json();
+        const token = data.value;
+        
+        grokSocket = new WebSocket("wss://api.x.ai/v1/realtime", [`xai-client-secret.${token}`]);
+        
+        grokSocket.onopen = () => {
+            console.log("🟢 Grok Realtime Connected!");
+            grokSocket.send(JSON.stringify({
+                type: "session.update",
+                session: {
+                    voice: "Rex",
+                    instructions: "You are Nova, an advanced, highly intelligent sci-fi desktop worker robot. Embody this persona fully. Keep your answers extremely concise and direct. NEVER introduce yourself. Talk naturally.",
+                    turn_detection: null, // We handle turns via Vosk (client side VAD)
+                    audio: {
+                        output: { format: { type: "audio/pcm", rate: 24000 } }
+                    }
+                }
+            }));
+        };
+
+        grokSocket.onmessage = (event) => {
+            const msg = JSON.parse(event.data);
+            if (msg.type === "response.output_audio.delta") {
+                playAudioChunk(msg.delta);
+            } else if (msg.type === "response.output_audio_transcript.done") {
+                console.log("🤖 Grok:", msg.transcript);
+            } else if (msg.type === "response.done") {
+                console.log("✅ Grok Finished Response.");
+            }
+        };
+
+        grokSocket.onclose = () => {
+            console.log("🔴 Grok Realtime Disconnected. Reconnecting in 3s...");
+            setTimeout(initGrokSocket, 3000);
+        };
+    } catch(e) {
+        console.error("Grok Socket Init Error:", e);
+    }
+}
+
+// Start Grok WS connection
+initGrokSocket();
+
+function askGrokRealtime(text) {
+    if (!grokSocket || grokSocket.readyState !== WebSocket.OPEN) {
+        console.error("Grok Socket not ready!");
+        return;
+    }
+    // Stop any currently overlapping audio
+    nextPlayTime = grokAudioContext.currentTime;
+    
+    // Create the message
+    grokSocket.send(JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: text }]
+        }
+    }));
+    // Request Nova to respond with audio
+    grokSocket.send(JSON.stringify({
+        type: "response.create",
+        response: { modalities: ["audio", "text"] }
+    }));
+}
 
 let listeningSymbol = document.createElement('div');
 listeningSymbol.innerHTML = '🎤 Listening...';
@@ -353,6 +436,21 @@ listeningSymbol.style.fontSize = '16px';
 listeningSymbol.style.display = 'none';
 listeningSymbol.style.textShadow = '0 0 5px #0ff';
 document.body.appendChild(listeningSymbol);
+
+let subtitleElement = document.createElement('div');
+subtitleElement.id = 'subtitle';
+subtitleElement.style.position = 'absolute';
+subtitleElement.style.bottom = '40px';
+subtitleElement.style.left = '50%';
+subtitleElement.style.transform = 'translateX(-50%)';
+subtitleElement.style.color = '#fff';
+subtitleElement.style.fontFamily = 'sans-serif';
+subtitleElement.style.fontSize = '24px';
+subtitleElement.style.textShadow = '0px 2px 4px rgba(0,0,0,0.8), 0px 0px 10px #0ff';
+subtitleElement.style.textAlign = 'center';
+subtitleElement.style.pointerEvents = 'none';
+subtitleElement.style.width = '80%';
+document.body.appendChild(subtitleElement);
 
 let uiLogElement = null;
 function uiLog(msg) {
@@ -380,8 +478,8 @@ async function initOfflineVoice() {
             video: false, 
             audio: { 
                 echoCancellation: true, 
-                noiseSuppression: true, 
-                autoGainControl: true,
+                noiseSuppression: false, 
+                autoGainControl: false,
                 channelCount: 1, 
                 sampleRate: 16000 
             }
@@ -395,37 +493,80 @@ async function initOfflineVoice() {
         recognizer = new model.KaldiRecognizer(16000);
         recognizer.setWords(true);
         
+        let isAwake = false;
+        let sleepTimer = null;
+        let speechTimer = null;
+        let accumulatedSpeech = "";
+
+        function wakeUp() {
+            isAwake = true;
+            clearTimeout(sleepTimer);
+            sleepTimer = setTimeout(() => {
+                isAwake = false;
+                uiLog("💤 Entered Sleep Mode");
+            }, 10000); 
+        }
+
         // Listen dynamically as the user speaks words
         recognizer.on("partialresult", (message) => {
             const text = message.result.partial.toLowerCase();
             if(!text) return;
             // Show mic instantly at the first sign of a greeting
-            if(text.includes("hey") || text.includes("nova") || text.includes("hi")) {
+            if(isAwake || text.match(/\b(hey|hay|hi)\b/)) {
+                listeningSymbol.innerHTML = '🎤 Listening...';
+                listeningSymbol.style.color = '#0ff';
                 listeningSymbol.style.display = 'block';
+                
+                let display = accumulatedSpeech + " " + text;
+                subtitleElement.innerText = display.trim();
+
                 uiLog(`Partial: "${text}"`);
+                if (isAwake) {
+                    clearTimeout(sleepTimer);
+                }
+                clearTimeout(speechTimer);
             }
         });
         
         // Triggered when user finishes sentence and falls silent
         recognizer.on("result", (message) => {
-            const text = message.result.text.toLowerCase();
-            listeningSymbol.style.display = 'none'; // Hide mic
+            const text = message.result.text.toLowerCase().trim();
             
             if(!text) return;
             uiLog(`Final: "${text}"`);
             
-            const wakeMatch = text.match(/(nova|noah|noel|know how|over)/);
-            
-            if (wakeMatch) {
-                let cmd = text.substring(wakeMatch.index + wakeMatch[0].length).trim();
+            if (isAwake || text.match(/\b(hey|hay|hi)\b/)) {
+                wakeUp();
                 
-                if (!cmd || cmd.length === 0) {
-                    speak("Nova is online. Processing initialized.");
-                } else {
-                    ipcRenderer.invoke('ask-grok', cmd).then(resp => speak(resp));
-                }
-            } else if (text === "hey" || text === "hi") {
-                speak("I am listening.");
+                accumulatedSpeech += " " + text;
+                accumulatedSpeech = accumulatedSpeech.trim();
+                subtitleElement.innerText = accumulatedSpeech;
+                
+                clearTimeout(speechTimer);
+                speechTimer = setTimeout(() => {
+                    listeningSymbol.innerHTML = '⚙️ Processing...';
+                    listeningSymbol.style.color = '#fb0';
+                    subtitleElement.style.color = '#fb0'; // Turn yellow to show it's locked in
+                    
+                    let cmd = accumulatedSpeech.replace(/\b(hey|hay|hi)\b/g, '').trim();
+                    accumulatedSpeech = "";
+                    
+                    if (!cmd || cmd.length === 0) {
+                        askGrokRealtime("Hello, Nova.");
+                        subtitleElement.innerText = "";
+                        listeningSymbol.style.display = 'none';
+                        subtitleElement.style.color = '#fff';
+                    } else {
+                        console.log('🎯 Processing command:', cmd);
+                        askGrokRealtime(cmd);
+                        subtitleElement.innerText = "";
+                        subtitleElement.style.color = '#fff';
+                        listeningSymbol.style.display = 'none';
+                        wakeUp();
+                    }
+                }, 2000); // Wait 2 seconds of final silence before executing
+            } else {
+                listeningSymbol.style.display = 'none';
             }
         });
         
@@ -439,14 +580,14 @@ async function initOfflineVoice() {
             const resumeAudio = () => {
                 if (audioContext.state === 'suspended') {
                     audioContext.resume().then(() => {
-                        uiLog("🎙️ Engine Unlocked! Say 'Hey Nova'");
+                        uiLog("🎙️ Engine Unlocked! Say 'Hey'");
                     }).catch(err => console.error("Resume failed:", err));
                 }
                 window.removeEventListener('pointerdown', resumeAudio);
             };
             window.addEventListener('pointerdown', resumeAudio);
         } else {
-            uiLog("🎙️ Engine Active! Say 'Hey Nova'");
+            uiLog("🎙️ Engine Active! Say 'Hey'");
         }
         const recognizerNode = audioContext.createScriptProcessor(4096, 1, 1);
         let meterThrottle = 0;
