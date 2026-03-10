@@ -14,7 +14,9 @@ function generateSpeech(text, relativeOutputPath) {
             return reject(new Error("Piper binary not found. Run: node scripts/download-piper.js"));
         }
 
-        const absoluteOutputPath = path.join(__dirname, relativeOutputPath);
+        // Use MP3 format for better browser compatibility
+        const mp3OutputPath = relativeOutputPath.replace('.wav', '.mp3');
+        const absoluteOutputPath = path.join(__dirname, mp3OutputPath);
         
         // Ensure the directory exists
         const dir = path.dirname(absoluteOutputPath);
@@ -22,16 +24,53 @@ function generateSpeech(text, relativeOutputPath) {
             fs.mkdirSync(dir, { recursive: true });
         }
 
+        // Generate WAV first, then convert to MP3
+        const tempWavPath = absoluteOutputPath.replace('.mp3', '.wav');
+        
         const piperProcess = spawn(piperPath, [
             '--model', modelPath,
-            '--output_file', absoluteOutputPath
+            '--output_file', tempWavPath
         ]);
 
-        piperProcess.on('close', (code) => {
+        let piperStderr = '';
+        piperProcess.stderr.on('data', (data) => {
+            piperStderr += data.toString();
+        });
+
+        piperProcess.on('close', async (code) => {
             if (code === 0) {
-                resolve(relativeOutputPath); // Return relative path for UI fetch
+                // Wait briefly to ensure file is flushed (avoid race condition)
+                let retries = 5;
+                while (retries > 0 && !fs.existsSync(tempWavPath)) {
+                    await new Promise(r => setTimeout(r, 100));
+                    retries--;
+                }
+
+                if (!fs.existsSync(tempWavPath)) {
+                    return reject(new Error(`Piper claimed success but ${tempWavPath} was not created after waiting.`));
+                }
+
+                // Convert WAV to MP3 using ffmpeg if available
+                const ffmpegProcess = spawn('ffmpeg', ['-i', tempWavPath, '-y', absoluteOutputPath]);
+                
+                ffmpegProcess.on('close', (ffmpegCode) => {
+                    if (ffmpegCode === 0 && fs.existsSync(absoluteOutputPath)) {
+                        try { fs.unlinkSync(tempWavPath); } catch (e) {}
+                        console.log('🔊 MP3 generated successfully');
+                        resolve(mp3OutputPath);
+                    } else {
+                        console.log('🔊 Using WAV format (ffmpeg failed or not available)');
+                        resolve(relativeOutputPath);
+                    }
+                });
+                
+                ffmpegProcess.on('error', () => {
+                    console.log('🔊 Using WAV format (ffmpeg error)');
+                    resolve(relativeOutputPath);
+                });
             } else {
-                reject(new Error(`Piper exited with code ${code}`));
+                console.error(`❌ Piper error: ${piperStderr}`);
+                reject(new Error(`Piper exited with code ${code}. Error: ${piperStderr}`));
             }
         });
         
