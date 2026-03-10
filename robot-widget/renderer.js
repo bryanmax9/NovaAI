@@ -1209,7 +1209,7 @@ async function processCommand(cmd) {
     - If user asks a general question (e.g. "what's the weather", "tell me a joke", "who is", "how are you"), respond with: "chat [original_text]"
     - If Active Platform Context is "youtube" AND user says "open [title]" or "play [title]", respond with: "see [original_text]"
     - If Awaiting Platform is YES and user says "google", "youtube" or "video", respond with just the platform name.
-    - If user is selecting an option (e.g. "one", "first") AND Choices > 0, respond with: "select [number]"
+    - If user is selecting an option (e.g. "one", "first", "second", "2") AND Choices > 0, respond with: "select [number]"
     - If user says playing intent (e.g. "play X", "play song X") AND it doesn't mention "this", "these", "that", "it", respond with: "play [song name]"
     - If user says searching intent (e.g. "search for X", "find X"), respond with: "search [query]"
     - Otherwise, respond with the action: ${cleanedCmd}
@@ -1248,7 +1248,7 @@ async function processCommand(cmd) {
         uiLog(`🤖 Interpreted: "${interpretedCommand}"`);
          // Command type detection
          const automationKeywords = ['open', 'search', 'youtube', 'browser', 'folder', 'vscode', 'cursor', 'antigravity', 'terminal', 'files', 'chrome', 'firefox', 'google', 'twitter', 'instagram', 'facebook', 'github', 'linkedin', 'click', 'video', 'link', 'directory', 'dir', 'play', 'song', 'see', 'look', 'screen', 'this', 'these', 'that', 'play it', 'play eat', 'play this', 'play these'];
-        const selectionKeywords = ['select', 'first', 'second', 'third', 'one', 'two', 'three', 'choice', 'option'];
+         const selectionKeywords = ['select', 'first', 'second', 'third', 'one', 'two', 'three', 'choice', 'option', '1', '2', '3'];
         
         let isAutomationCommand = automationKeywords.some(keyword => interpretedCommand.includes(keyword));
         
@@ -1282,10 +1282,18 @@ async function processCommand(cmd) {
             // Selection Logic
             if (window.novaState.pendingChoices.length > 0 && selectionKeywords.some(kw => normalizedCmd.includes(kw))) {
                 let index = -1;
-                if (normalizedCmd.includes('first') || normalizedCmd.includes('one')) index = 0;
-                else if (normalizedCmd.includes('second') || normalizedCmd.includes('two')) index = 1;
-                else if (normalizedCmd.includes('third') || normalizedCmd.includes('three')) index = 2;
-
+                
+                // Try digit extraction first (select 1, option 2)
+                const digitMatch = normalizedCmd.match(/\d+/);
+                if (digitMatch) {
+                    index = parseInt(digitMatch[0]) - 1;
+                } else {
+                    // Fallback to word matching
+                    if (normalizedCmd.includes('first') || normalizedCmd.includes('one')) index = 0;
+                    else if (normalizedCmd.includes('second') || normalizedCmd.includes('two')) index = 1;
+                    else if (normalizedCmd.includes('third') || normalizedCmd.includes('three')) index = 2;
+                }
+                
                 if (index >= 0 && index < window.novaState.pendingChoices.length) {
                     const choice = window.novaState.pendingChoices[index];
                     window.novaState.pendingTopic = choice.title;
