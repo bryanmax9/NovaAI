@@ -1060,6 +1060,7 @@ async function initOfflineVoice() {
 
         // Listen dynamically as the user speaks words
         recognizer.on("partialresult", (message) => {
+            if (window.novaState.isSpeaking) return; // Prevent loop where Nova hears itself
             const text = message.result.partial.toLowerCase();
             if(!text) return;
 
@@ -1100,6 +1101,7 @@ async function initOfflineVoice() {
         
         // Triggered when user finishes sentence and falls silent
         recognizer.on("result", (message) => {
+            if (window.novaState.isSpeaking && !message.result.text.match(/\b(stop|quiet|hush|cancel)\b/i)) return; // Allow early exit interruptions but block self-talk
             let text = message.result.text.toLowerCase().trim();
             
             // Filter [unk] from final result
@@ -1477,12 +1479,12 @@ async function processCommand(cmd) {
     }
 
     // 3. Silence Mode (Quiet Mode)
-    if (normalized.match(/\b(silence|stop listening|shut up|be quiet|go to sleep|sleep mode|deactivate|quiet mode|go quiet|ignore me|don't listen)\b/i)) {
+        if (normalized.match(/\b(silence|stop listening|shut up|be quiet|go to sleep|sleep mode|deactivate|quiet mode|go quiet|ignore me|don't listen)\b/i)) {
         if (!window.novaState.isSilenced) {
             window.novaState.lastDirectCommandTime = now;
             window.novaState.isSilenced = true;
             uiLog("🔇 Silence mode activated. Say 'Hey' to wake me.");
-            speak("Okay, I'll be quiet now. Just say 'Hey Nova' when you need me again.");
+            speak("I'm going into standby now. Just let me know when you need me.");
         }
         return;
     }
@@ -1564,17 +1566,9 @@ async function processCommand(cmd) {
         if (window.novaState.isSpeaking) window.speechSynthesis.cancel();
         if (target.length > 0) {
             uiLog(`🖱️ Scanning for: "${target}"...`);
-            ipcRenderer.send('browser-get-map');
             
-            // Timeout for map request
-            let mapTimeout = setTimeout(() => {
-                console.error("🕒 AI Click Error: DOM Map request timed out (5s).");
-                uiLog("🕒 Nova is taking too long to see the page. Trying fallback...");
-                ipcRenderer.send('browser-click', target); 
-            }, 5000);
-
-            // Listen for DOM map results
-            ipcRenderer.once('browser-dom-map', async (event, elements) => {
+            // 1. Register listener BEFORE sending request (Fix Race Condition)
+            const mapHandler = async (event, elements) => {
                 clearTimeout(mapTimeout);
                 console.log(`🧠 AI Click: Received DOM map with ${elements?.length || 0} elements.`);
                 if (!elements || elements.length === 0) {
@@ -1609,7 +1603,21 @@ async function processCommand(cmd) {
                     uiLog(`⚠️ AI couldn't resolve "${target}". Trying literal...`);
                     ipcRenderer.send('browser-click', target); // Fallback
                 }
-            });
+            };
+            
+            ipcRenderer.once('browser-dom-map', mapHandler);
+
+            // 2. Clear previous handlers and send request
+            ipcRenderer.send('browser-get-map');
+            
+            // Timeout for map request
+            let mapTimeout = setTimeout(() => {
+                ipcRenderer.removeListener('browser-dom-map', mapHandler);
+                console.error("🕒 AI Click Error: DOM Map request timed out (5s).");
+                uiLog("🕒 Nova is taking too long to see the page. Trying fallback...");
+                ipcRenderer.send('browser-click', target); 
+            }, 5000);
+
             window.novaState.isProcessingCommand = false;
             return;
         }
@@ -1701,6 +1709,11 @@ async function processCommand(cmd) {
 
     Rules:
 
+    - CRITICAL: If the user is asking a question (e.g., "what's", "who is", "how do I", "why", "tell me about"), respond with: chat <original_text>
+    - If the user explicitly says "search for" or "find info on", return: search <query>
+    - IF the intent is to SEARCH for a product, buy something, or find information AND it's NOT a natural question, return: search <query>
+    - If user says "play the video", "resume the video", "pause the video" or just "play" or "pause", respond with: "play" 
+    - If user says searching intent (e.g. "search for X", "find X", "buy X", "help me search for X"), respond with: "search [query]"
     - FIRST PRIORITY: If user says "switch to <app>", "go to <app>", "focus <app>", "bring up <app>", "open <app>" where <app> is a specific application name (examples: browser, firefox, chrome, brave, vscode, code, cursor, intellij, idea, pycharm, terminal, konsole, excel, spreadsheet, calc, libreoffice, word, writer, powerpoint, impress, files, dolphin, discord, slack, telegram, spotify, vlc, gimp, blender, obsidian, zoom), respond with: "focus <app>" where <app> is just the lowercase application name (e.g. "focus browser", "focus vscode", "focus excel", "focus intellij")
     - SECOND PRIORITY: If user says "switch window", "switch app", "next app", "next window", "alt tab", "change app", "change window", or "switch to another" WITHOUT naming a specific application, respond with exactly: "switch window"
     - If user asks a general question (e.g. "what's the weather", "tell me a joke", "who is", "how are you"), or if the sentence sounds like background talk (e.g. "if it doesn't show up"), respond with: "chat [original_text]"
@@ -1767,10 +1780,14 @@ async function processCommand(cmd) {
         }
         
         // Check if it's a question or conversation
-        const questionWords = ['what', 'how', 'why', 'when', 'where', 'who', 'can you', 'could you', 'would you', 'should i', 'recommend', 'suggest', 'tell me', 'explain', 'do you', 'are there'];
+        const questionWords = ['what', 'how', 'why', 'when', 'where', 'who', 'can you', 'could you', 'would you', 'should i', 'recommend', 'suggest', 'tell me', 'explain', 'do you', 'are there', 'what\'s'];
         const isQuestion = questionWords.some(word => interpretedCommand.includes(word));
         
-        if (isQuestion && !isAutomationCommand) {
+        // PRIORITIZE QUESTIONS: Even if it's tagged as automation (like "search"),
+        // if it looks like a question and doesn't explicitly have the "search" verb in interpretedCommand
+        const explicitSearch = interpretedCommand.startsWith('search');
+        
+        if (isQuestion && (!isAutomationCommand || !explicitSearch)) {
             window.novaState.isProcessingCommand = false;
             await askGrokRealtime(cmd);
             return;

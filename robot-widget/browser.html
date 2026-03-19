@@ -129,6 +129,7 @@
                     const el = document.querySelector('[nova-id="${id}"]');
                     if (el) {
                         el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        
                         // Visual ripple
                         const rect = el.getBoundingClientRect();
                         const x = rect.left + rect.width / 2;
@@ -136,8 +137,26 @@
                         const ripple = document.createElement('div');
                         ripple.style.cssText = 'position:fixed; z-index:999999; border: 4px solid #0ff; border-radius:50%; pointer-events:none; width:60px; height:60px; left:'+(x-30)+'px; top:'+(y-30)+'px; transition: all 0.4s; opacity:1; transform:scale(0.3);';
                         document.body.appendChild(ripple);
-                        setTimeout(() => { ripple.style.transform = 'scale(1.5)'; ripple.style.opacity = '0'; }, 10);
-                        setTimeout(() => { ripple.remove(); el.click(); }, 400);
+                        
+                        setTimeout(() => { 
+                            ripple.style.transform = 'scale(1.5)'; 
+                            ripple.style.opacity = '0'; 
+                        }, 10);
+                        
+                        setTimeout(() => { 
+                            ripple.remove(); 
+                            // Try multiple click methods for robustness
+                            el.focus();
+                            el.click();
+                            
+                            // Fallback for elements that need pointer events
+                            const mouseEvent = new MouseEvent('click', {
+                                view: window,
+                                bubbles: true,
+                                cancelable: true
+                            });
+                            el.dispatchEvent(mouseEvent);
+                        }, 400);
                         return true;
                     }
                     return false;
