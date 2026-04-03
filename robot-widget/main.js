@@ -118,34 +118,78 @@ function createChatWindow() {
 }
 
 let browserWin = null;
+let isBrowserReady = false;
+let pendingBrowserUrl = null;
+
+ipcMain.on('browser-ready', () => {
+    console.log('📡 Bridge: Browser Agent is ready.');
+    isBrowserReady = true;
+    if (pendingBrowserUrl && browserWin) {
+        console.log('📡 Bridge: Sending pending navigation:', pendingBrowserUrl);
+        browserWin.webContents.send('navigate', pendingBrowserUrl);
+        pendingBrowserUrl = null;
+    }
+});
+
 function openBrowser(data) {
-    console.log('🌍 Opening Browser Agent...');
+    if (!data) return;
+    console.log('🌍 Opening Browser Agent with:', data);
+
     if (!browserWin) {
         createBrowserWindow();
     }
 
-    const navigate = () => {
-        if (!data) return;
-        let url;
+    const navigate = async () => {
+        let url = '';
         if (typeof data === 'string') {
-            url = data.startsWith('www.') ? `https://${data}` : data;
-        } else if (data.platform === 'youtube') {
-            url = `https://www.youtube.com/results?search_query=${encodeURIComponent(data.query)}`;
-        } else if (data.platform === 'google') {
-            url = `https://www.google.com/search?q=${encodeURIComponent(data.query)}`;
+            const isUrl = data.includes('.') && !data.includes(' ');
+            if (isUrl) {
+                url = data.startsWith('http') ? data : `https://${data}`;
+            } else {
+                url = `https://www.google.com/search?q=${encodeURIComponent(data)}`;
+            }
+        } else {
+            const { platform, query } = data;
+            if (platform === 'youtube' && query) {
+                try {
+                    console.log(`🔍 Super-Lucky Search: ${query}`);
+                    const { exec } = require('child_process');
+                    const videoId = await new Promise((resolve) => {
+                        exec(`yt-dlp --get-id "ytsearch1:${query}"`, (err, stdout) => {
+                            resolve(err ? null : stdout.trim());
+                        });
+                    });
+                    if (videoId && videoId.length < 20) {
+                        url = `https://www.youtube.com/watch?v=${videoId}`;
+                    }
+                } catch (e) {
+                    console.error('Super-Lucky failed:', e);
+                }
+            }
+
+            if (!url) {
+                url = platform === 'youtube'
+                    ? `https://www.youtube.com/results?search_query=${encodeURIComponent(query || '')}`
+                    : `https://www.google.com/search?q=${encodeURIComponent(query || '')}`;
+            }
         }
 
-        if (url) {
-            console.log('📡 Browser: Navigating to', url);
-            browserWin.webContents.send('navigate', url);
+        if (url && browserWin) {
+            if (isBrowserReady) {
+                console.log('📡 Browser: Navigating to', url);
+                browserWin.webContents.send('navigate', url);
+            } else {
+                console.log('📡 Browser: Pending navigation for', url);
+                pendingBrowserUrl = url;
+            }
         }
     };
 
-    if (browserWin.isVisible()) {
+    if (browserWin && browserWin.isVisible && browserWin.isVisible()) {
         navigate();
-    } else {
-        browserWin.once('ready-to-show', navigate);
+    } else if (browserWin) {
         browserWin.show();
+        // The browser-ready IPC will trigger the navigation
     }
 }
 
@@ -164,16 +208,17 @@ function getDomMap() {
     if (browserWin) {
         browserWin.webContents.send('get-dom-map');
     } else {
-        ipcMain.emit('dom-map-available', []);
+        // Emit the same shape live.js expects so the Promise resolves cleanly
+        ipcMain.emit('dom-map-available', { map: [], url: 'No browser open' });
     }
 }
 
 function clickBrowserId(id) {
-    if (browserWin) browserWin.webContents.send('click-id', id);
+    if (browserWin) browserWin.webContents.send('click-by-id', id);
 }
 
 function smartClickBrowser(text) {
-    if (browserWin) browserWin.webContents.send('click-text', text);
+    if (browserWin) browserWin.webContents.send('smart-click', text);
 }
 
 const Automation = {
@@ -188,8 +233,16 @@ const Automation = {
     },
     focusApp: async (appName) => {
         return await focusAppInternal(appName);
+    },
+    speak: (text) => {
+        if (mainWindow) mainWindow.webContents.send('speak', text);
     }
 };
+
+ipcMain.handle('execute-automation', async (event, action) => {
+    console.log('⚡ [Live Tool Trigger] Executing OS Command:', action);
+    return await executeAutomationInternal(action.trim());
+});
 
 function createBrowserWindow() {
     if (browserWin) {
@@ -206,7 +259,9 @@ function createBrowserWindow() {
         webPreferences: {
             nodeIntegration: true,
             contextIsolation: false,
-            webviewTag: true // CRITICAL: Enables <webview> in the browser.html
+            webviewTag: true,       // CRITICAL: Enables <webview> in the browser.html
+            webSecurity: false,     // Allow executeJavaScript on any origin
+            allowRunningInsecureContent: true
         }
     });
 
@@ -214,6 +269,8 @@ function createBrowserWindow() {
 
     browserWin.on('closed', () => {
         browserWin = null;
+        isBrowserReady = false;
+        pendingBrowserUrl = null;
     });
 }
 
@@ -252,6 +309,15 @@ ipcMain.on('live-end', (event) => {
 });
 
 ipcMain.handle('browser-open', async (event, data) => {
+    // DE-BOUNCE: Prevent repetitive searches while talking
+    const now = Date.now();
+    const queryStr = (typeof data === 'string') ? data : (data.query || '');
+    if (global.lastLaunchTimes && global.lastLaunchTimes.has('browser-search') && (now - global.lastLaunchTimes.get('browser-search') < 6000)) {
+        console.log(`🛡️ De-bounce: Skipping repetitive browser search for "${queryStr.substring(0, 20)}..."`);
+        return true;
+    }
+    if (!global.lastLaunchTimes) global.lastLaunchTimes = new Map();
+    global.lastLaunchTimes.set('browser-search', now);
     openBrowser(data);
     return true;
 });
@@ -268,11 +334,11 @@ ipcMain.on('browser-get-map', (event) => {
     getDomMap();
 });
 
-ipcMain.on('dom-map-results', (event, map) => {
-    console.log(`🧠 Bridge: Received DOM Map (${map?.length || 0} elements) from Browser.`);
+ipcMain.on('dom-map-results', (event, { map, url }) => {
+    console.log(`🧠 Bridge: Received DOM Map (${map?.length || 0} elements) from Browser URL: ${url}`);
     if (mainWindow) mainWindow.webContents.send('browser-dom-map', map);
     // Also emit to ipcMain for live.js to pick up
-    ipcMain.emit('dom-map-available', map);
+    ipcMain.emit('dom-map-available', { map, url });
 });
 
 ipcMain.on('browser-click-id', (event, id) => {
@@ -282,6 +348,7 @@ ipcMain.on('browser-click-id', (event, id) => {
 ipcMain.on('browser-click', (event, target) => {
     smartClickBrowser(target);
 });
+
 
 // Helper for cross-platform keyboard emulation
 async function emulatePlaySequence(window) {
@@ -484,6 +551,7 @@ async function executeAutomationInternal(command) {
 
         const closeAppMap = {
             'vscode': 'code',
+            'vs code': 'code',
             'visual studio code': 'code',
             'browser': platform === 'linux' ? 'zen' : platform === 'darwin' ? 'Safari' : 'msedge',
             'chrome': platform === 'linux' ? 'google-chrome' : 'Google Chrome',
@@ -491,12 +559,24 @@ async function executeAutomationInternal(command) {
         };
         const target = closeAppMap[appName] || appName;
 
+        // SAFEGUARD: Don't kill Nova or VS Code if we're running inside it
+        const selfTargets = ['node', 'electron', 'robot-widget', 'nova', 'assistant'];
+        if (selfTargets.includes(target.toLowerCase())) {
+            console.warn(`🛑 Safeguard: Blocked attempt to terminate assistant via target "${target}"`);
+            return "I cannot close myself using this command.";
+        }
+
+        if (target.toLowerCase() === 'code' && process.env.VSCODE_PID) {
+            console.warn("🛡️ Safeguard: Blocked 'pkill code' because the assistant is running in a VS Code process.");
+            return "Closing VS Code would also terminate me. Please close it manually if needed.";
+        }
+
         console.log(`📡 Terminating app: ${target} (parsed from: ${appName})`);
 
         if (platform === 'win32') {
             exec(`taskkill /IM ${target}.exe /F /T`);
         } else {
-            exec(`pkill -i -f "${target}"`);
+            exec(`pkill -i "${target}"`);
         }
         return `Closing ${target}.`;
     }
@@ -536,32 +616,53 @@ async function executeAutomationInternal(command) {
         return `${folderName} folder opened.`;
     }
 
-    // 5. UNIFIED INTERNAL BROWSER ROUTING
-    if (cmd.match(/\b(youtube|you tube|play song|play|video)\b/i)) {
-        let searchTerm = cmd.replace(/search|play song|play|youtube|you tube|video/gi, '').trim();
-        openBrowser({ platform: 'youtube', query: searchTerm || 'youtube' });
-        return `Opening ${searchTerm || 'YouTube'} in Internal Browser.`;
+    // 5. APP LAUNCH — check BEFORE generic search routing so "open zoom", "open docs", etc.
+    //    never get swallowed by the google/search regex below.
+    if (cmd.startsWith('open ') || cmd.startsWith('launch ') || cmd.startsWith('focus ')) {
+        const appName = cmd.replace(/^(open |launch |focus )/, '').trim();
+        const appKey = (ALIASES[appName] || appName).toLowerCase();
+        // If it's a known app, focus/launch it directly
+        if (APP_FOCUS_MAP[appKey]) {
+            return await focusAppInternal(appName);
+        }
+        // Unknown app — still try to launch it rather than searching
+        if (appName.length > 0 && !appName.match(/\b(browser|google|web|http|www)\b/i)) {
+            return await focusAppInternal(appName);
+        }
     }
 
-    if (cmd.match(/\b(google|search|browser|web)\b/i)) {
-        let searchTerm = cmd.replace(/search|google|browser|web|open browser/gi, '').trim();
-        openBrowser({ platform: 'google', query: searchTerm || 'google' });
-        return `Opening ${searchTerm || 'Google'} in Internal Browser.`;
-    }
-
-    // 6. Generic Application Management (Catch-all for opening/focusing)
-    if (cmd.includes('open ') || cmd.includes('launch ') || cmd.includes('focus ')) {
-        const appName = cmd.replace(/open |launch |focus /g, '').trim();
-        return await focusAppInternal(appName);
-    }
-
-    // Fallback for direct app keywords (if AI didn't prepend "open")
-    const commonApps = ['vscode', 'code', 'terminal', 'zoom', 'files', 'chrome', 'firefox'];
-    if (commonApps.includes(cmd)) {
+    // Direct app keywords (exact matches from map or alias table)
+    if (APP_FOCUS_MAP[cmd] || ALIASES[cmd]) {
         return await focusAppInternal(cmd);
     }
 
-    return "I processed your command, but it was not a recognized system utility.";
+    // 5b. BROWSER CONTROL FALLBACK — catches scroll/click commands that Gemini
+    //     accidentally routes to execute_system_command instead of control_browser.
+    if (cmd.match(/^scroll (down|up|top|bottom)$/)) {
+        const direction = cmd.split(' ')[1];
+        scrollBrowser(direction);
+        return `Scrolling ${direction}.`;
+    }
+    if (cmd === 'close browser' || cmd === 'close the browser') {
+        closeBrowser();
+        return 'Browser closed.';
+    }
+
+    // 6. MEDIA (explicit YouTube/play intent only)
+    if (cmd.match(/\b(youtube|you tube|play song)\b/i)) {
+        const searchTerm = cmd.replace(/\b(youtube|you tube|play song|search)\b/gi, '').trim();
+        openBrowser({ platform: 'youtube', query: searchTerm || 'youtube' });
+        return `Opening YouTube for "${searchTerm || 'YouTube'}".`;
+    }
+
+    // 7. EXPLICIT BROWSER OPEN only — "search X" is NOT handled here to prevent
+    //    spurious searches during conversations. Searches go through control_browser.
+    if (cmd === 'browser' || cmd === 'open browser' || cmd.startsWith('browse ')) {
+        openBrowser({ platform: 'google', query: '' });
+        return 'Opening the browser for you.';
+    }
+
+    return "Command not recognized as a system action.";
 }
 
 // Redundant helpers removed to consolidate logic above.
@@ -666,49 +767,77 @@ const APP_FOCUS_MAP = {
     dolphin: { classes: 'dolphin|Dolphin', launch: 'dolphin', macosApp: 'Finder', winExe: 'explorer' },
     nautilus: { classes: 'nautilus|Nautilus|org.gnome.Nautilus', launch: 'nautilus', macosApp: 'Finder', winExe: 'explorer' },
     // ── Communication ─────────────────────────────────────────────────────
-    discord: { classes: 'discord|Discord', launch: 'discord', macosApp: 'Discord', winExe: 'discord' },
-    slack: { classes: 'slack|Slack', launch: 'slack', macosApp: 'Slack', winExe: 'slack' },
-    telegram: { classes: 'telegram|Telegram', launch: 'telegram-desktop', macosApp: 'Telegram', winExe: 'telegram' },
+    discord: { classes: 'discord|Discord', launch: 'discord 2>/dev/null || flatpak run com.discordapp.Discord 2>/dev/null || snap run discord 2>/dev/null', macosApp: 'Discord', winExe: 'discord' },
+    slack: { classes: 'slack|Slack', launch: 'slack 2>/dev/null || flatpak run com.slack.Slack 2>/dev/null || snap run slack 2>/dev/null', macosApp: 'Slack', winExe: 'slack' },
+    telegram: { classes: 'telegram|Telegram', launch: 'telegram-desktop 2>/dev/null || flatpak run org.telegram.desktop 2>/dev/null || Telegram 2>/dev/null', macosApp: 'Telegram', winExe: 'telegram' },
     // ── Media ─────────────────────────────────────────────────────────────
-    spotify: { classes: 'spotify|Spotify', launch: 'spotify', macosApp: 'Spotify', winExe: 'spotify' },
-    vlc: { classes: 'vlc|VLC', launch: 'vlc', macosApp: 'VLC', winExe: 'vlc' },
+    spotify: { classes: 'spotify|Spotify', launch: 'spotify 2>/dev/null || flatpak run com.spotify.Client 2>/dev/null || snap run spotify 2>/dev/null', macosApp: 'Spotify', winExe: 'spotify' },
+    vlc: { classes: 'vlc|VLC', launch: 'vlc 2>/dev/null || flatpak run org.videolan.VLC 2>/dev/null', macosApp: 'VLC', winExe: 'vlc' },
     // ── Other ─────────────────────────────────────────────────────────────
-    obsidian: { classes: 'obsidian|Obsidian', launch: 'obsidian', macosApp: 'Obsidian', winExe: 'Obsidian' },
-    gimp: { classes: 'gimp|Gimp', launch: 'gimp', macosApp: 'GIMP', winExe: 'gimp' },
-    blender: { classes: 'blender|Blender', launch: 'blender', macosApp: 'Blender', winExe: 'blender' },
-    zoom: { classes: 'zoom|Zoom', launch: 'zoom', macosApp: 'zoom.us', winExe: 'zoom' },
+    obsidian: { classes: 'obsidian|Obsidian', launch: 'obsidian 2>/dev/null || flatpak run md.obsidian.Obsidian 2>/dev/null', macosApp: 'Obsidian', winExe: 'Obsidian' },
+    gimp: { classes: 'gimp|Gimp', launch: 'gimp 2>/dev/null || flatpak run org.gimp.GIMP 2>/dev/null', macosApp: 'GIMP', winExe: 'gimp' },
+    blender: { classes: 'blender|Blender', launch: 'blender 2>/dev/null || flatpak run org.blender.Blender 2>/dev/null', macosApp: 'Blender', winExe: 'blender' },
+    zoom: { classes: 'zoom|Zoom', launch: 'zoom 2>/dev/null || /opt/zoom/zoom 2>/dev/null || flatpak run us.zoom.Zoom 2>/dev/null || snap run zoom-client 2>/dev/null', macosApp: 'zoom.us', winExe: 'zoom' },
+    // ── Games ─────────────────────────────────────────────────────────────────
+    antigravity: { classes: 'antigravity|Antigravity', launch: 'antigravity', macosApp: 'Antigravity', winExe: 'antigravity' },
+    // ── Document apps — use local system apps (LibreOffice on Linux) ─────────
+    docs: { classes: 'libreoffice|soffice|swriter', launch: 'libreoffice --writer 2>/dev/null || soffice --writer 2>/dev/null', macosApp: 'Pages', winExe: 'winword' },
+    sheets: { classes: 'libreoffice|soffice|scalc', launch: 'libreoffice --calc 2>/dev/null || soffice --calc 2>/dev/null', macosApp: 'Numbers', winExe: 'excel' },
+    slides: { classes: 'libreoffice|soffice|simpress', launch: 'libreoffice --impress 2>/dev/null || soffice --impress 2>/dev/null', macosApp: 'Keynote', winExe: 'powerpnt' },
+    // ── Google Web Apps (open in system default browser) ──────────────────────
+    drive: { classes: 'Google Drive', launch: 'xdg-open https://drive.google.com/', macosApp: null, winExe: null },
+    gmail: { classes: 'Gmail|Google Mail', launch: 'xdg-open https://mail.google.com/', macosApp: null, winExe: null },
+    meet: { classes: 'Google Meet', launch: 'xdg-open https://meet.google.com/', macosApp: null, winExe: null },
+};
+
+// Normalize common speech variants → canonical APP_FOCUS_MAP key
+const ALIASES = {
+    'code': 'vscode', 'vs code': 'vscode', 'visual studio code': 'vscode', 'visual studio': 'vscode',
+    'vs-code': 'vscode', 'vs_code': 'vscode',
+    'idea': 'intellij', 'jet brains': 'intellij', 'jetbrains': 'intellij', 'android studio': 'intellij',
+    'web storm': 'webstorm', 'py charm': 'pycharm',
+    'konsole': 'terminal', 'gnome terminal': 'terminal', 'gnome-terminal': 'terminal',
+    'xterm': 'terminal', 'kitty': 'terminal', 'alacritty': 'terminal',
+    'libre office': 'libreoffice', 'libre-office': 'libreoffice', 'open office': 'libreoffice',
+    'spreadsheet': 'sheets', 'calc': 'sheets',
+    'libre office calc': 'sheets', 'libreoffice calc': 'sheets',
+    'document': 'docs', 'libre office writer': 'docs', 'libreoffice writer': 'docs',
+    'presentation': 'slides',
+    'libre office impress': 'slides', 'libreoffice impress': 'slides',
+    'navigator': 'browser', 'web browser': 'browser', 'internet': 'browser',
+    'google chrome': 'chrome',
+    'file manager': 'files', 'file explorer': 'files', 'explorer': 'files',
+    'finder': 'files', 'nautilus': 'files',
+    'music': 'spotify', 'media player': 'spotify',
+    'video editor': 'blender', 'photo editor': 'gimp',
+    'chat': 'discord', 'messages': 'telegram',
+    'meetings': 'zoom', 'video call': 'zoom', 'video conference': 'zoom',
+    // Google web apps
+    'google docs': 'docs', 'google doc': 'docs', 'gdocs': 'docs',
+    'google sheets': 'sheets', 'google sheet': 'sheets', 'gsheets': 'sheets',
+    'google slides': 'slides', 'gslides': 'slides',
+    'google drive': 'drive', 'gdrive': 'drive',
+    'google mail': 'gmail',
+    'google meet': 'meet',
+    // Games / other
+    'anti gravity': 'antigravity',
 };
 
 async function focusAppInternal(appName) {
-    // Normalize common speech variants → canonical APP_FOCUS_MAP key
-    const ALIASES = {
-        'code': 'vscode', 'vs code': 'vscode', 'visual studio code': 'vscode', 'visual studio': 'vscode',
-        'vs-code': 'vscode', 'vs_code': 'vscode',
-        'idea': 'intellij', 'jet brains': 'intellij', 'jetbrains': 'intellij', 'android studio': 'intellij',
-        'web storm': 'webstorm', 'py charm': 'pycharm',
-        'konsole': 'terminal', 'gnome terminal': 'terminal', 'gnome-terminal': 'terminal',
-        'xterm': 'terminal', 'kitty': 'terminal', 'alacritty': 'terminal',
-        'libre office': 'libreoffice', 'libre-office': 'libreoffice', 'open office': 'libreoffice',
-        'spreadsheet': 'excel', 'google sheets': 'excel', 'calc': 'excel',
-        'libre office calc': 'excel', 'libreoffice calc': 'excel',
-        'document': 'word', 'libre office writer': 'word', 'libreoffice writer': 'word',
-        'presentation': 'powerpoint', 'slides': 'powerpoint',
-        'libre office impress': 'powerpoint', 'libreoffice impress': 'powerpoint',
-        'navigator': 'browser', 'web browser': 'browser', 'internet': 'browser',
-        'google chrome': 'chrome', 'google': 'chrome',
-        'file manager': 'files', 'file explorer': 'files', 'explorer': 'files',
-        'finder': 'files', 'dolphin': 'dolphin', 'nautilus': 'files',
-        'music': 'spotify', 'media player': 'spotify',
-        'video editor': 'blender', 'photo editor': 'gimp',
-        'chat': 'discord', 'messages': 'telegram',
-        'meetings': 'zoom', 'video call': 'zoom',
-    };
-
     let key = appName.toLowerCase().trim();
     // Apply alias table
     if (ALIASES[key]) key = ALIASES[key];
     // Strip leading/trailing noise GPT sometimes adds
     key = key.replace(/^(the |a |my |to |on )/, '').trim();
+
+    // DE-BOUNCE: Prevent re-launching the same app within 8 seconds
+    const now = Date.now();
+    if (global.lastLaunchTimes && global.lastLaunchTimes.has(key) && (now - global.lastLaunchTimes.get(key) < 8000)) {
+        console.log(`🛡️ De-bounce: Skipping repetitive launch for "${key}"`);
+        return `I'm already opening ${appName}. Please wait a moment.`;
+    }
+    if (!global.lastLaunchTimes) global.lastLaunchTimes = new Map();
+    global.lastLaunchTimes.set(key, now);
 
     const entry = APP_FOCUS_MAP[key];
 
@@ -724,6 +853,12 @@ async function focusAppInternal(appName) {
     console.log(`🎯 Focusing app: "${appName}" (entry: ${JSON.stringify(entry)})`);
 
     if (process.platform === 'darwin') {
+        if (!entry.macosApp) {
+            // URL-based or web app — open with 'open' command
+            const cmd = entry.launch.replace(/^xdg-open /, 'open ');
+            exec(cmd, () => {});
+            return `Opening ${appName}.`;
+        }
         const activateCmd = `osascript -e 'tell application "${entry.macosApp}" to activate'`;
         const openCmd = `open -a "${entry.macosApp}"`;
         exec(activateCmd, (err) => {
@@ -733,6 +868,12 @@ async function focusAppInternal(appName) {
     }
 
     if (process.platform === 'win32') {
+        if (!entry.winExe) {
+            // URL-based app on Windows
+            const url = entry.launch.replace(/^xdg-open /, '');
+            exec(`start "" "${url}"`, () => {});
+            return `Opening ${appName}.`;
+        }
         const psCmd = `powershell -command "
             $wnd = (Get-Process | Where-Object {$_.MainWindowTitle -match '${key}'} | Select-Object -First 1);
             if ($wnd) {
@@ -741,6 +882,14 @@ async function focusAppInternal(appName) {
             } else { Start-Process '${entry.winExe}' }"`;
         exec(psCmd, () => { });
         return `Switching to ${appName}.`;
+    }
+
+    // Web-based apps: just open the URL directly, no window-raise needed
+    if (entry.launch && entry.launch.startsWith('xdg-open http')) {
+        exec(entry.launch, (err) => {
+            if (err) console.error(`❌ xdg-open failed for "${appName}":`, err);
+        });
+        return `Opening ${appName}.`;
     }
 
     const isWayland = process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === 'wayland';
@@ -772,12 +921,12 @@ async function focusAppInternal(appName) {
     }
 
     console.log(`🚀 No open window found for "${appName}", launching...`);
-    // Use detached spawn for more reliable GUI launch that outlives the command
-    const [bin, ...args] = entry.launch.split(' ');
-    const child = spawn(bin, args, {
+    // Use sh -c so the full launch string (including || fallbacks) is handled by the shell
+    const shellBin = process.platform === 'win32' ? 'cmd' : 'sh';
+    const shellArg = process.platform === 'win32' ? '/c' : '-c';
+    const child = spawn(shellBin, [shellArg, entry.launch], {
         detached: true,
         stdio: 'ignore',
-        shell: true,
         env: { ...process.env, DISPLAY: process.env.DISPLAY || ':0' }
     });
     child.unref();

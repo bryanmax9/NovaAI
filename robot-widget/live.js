@@ -7,6 +7,8 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 let activeSession = null;
 let mainWindowRef = null;
 let automationRef = null;
+const lastExecCommandMap = new Map(); // cmdKey → last call timestamp
+const EXEC_COOLDOWN_MS = 15000; // Per-command cooldown: 15 seconds
 
 async function startLiveSession(mainWindow, automation) {
     mainWindowRef = mainWindow;
@@ -17,48 +19,79 @@ async function startLiveSession(mainWindow, automation) {
     }
 
     try {
-        console.log('🔄 Connecting to Gemini Live API with Visual DOM Mapping...');
+        console.log('🔄 Connecting to Gemini Live API...');
 
         const model = 'gemini-3.1-flash-live-preview';
         activeSession = await ai.live.connect({
             model: model,
             config: {
+                responseModalities: [Modality.AUDIO],
+                systemInstruction:
+                    "You are Nova, a brilliant multilingual AI assistant. Always respond in the user's language.\n\n" +
+
+                    "== YOUR PRIMARY MODE IS CONVERSATION ==\n" +
+                    "You have encyclopedic knowledge: science, math, history, weather, news, coding, homework, recipes, jokes, culture — everything. " +
+                    "For ANY question or topic, respond verbally with your own knowledge. NEVER open a browser or run a command just to answer a question.\n\n" +
+
+                    "== TOOL USAGE: STRICT TRIGGER RULES ==\n" +
+                    "You have three tools. Use them ONLY when the user gives a direct action command:\n\n" +
+
+                    "1. execute_system_command — ONLY when user explicitly says 'open', 'launch', 'start', 'close', or 'run' followed by an app name.\n" +
+                    "   - Triggers: 'open zoom', 'launch terminal', 'close spotify', 'open docs'\n" +
+                    "   - Never triggers: questions, topics, 'what is X', 'tell me about X', any conversation\n" +
+                    "   - NEVER call more than once per app. If cooldown returns Skipped, do NOT retry.\n\n" +
+
+                    "2. control_browser — ONLY for these exact browser commands:\n" +
+                    "   - 'scroll down' / 'scroll up' → action='scroll', direction='down' or 'up'\n" +
+                    "   - 'search for X on google' / 'go to website X' / 'open X in the browser' → action='open', query='X'\n" +
+                    "   - 'play X on youtube' / 'search youtube for X' → action='search_youtube', query='X'\n" +
+                    "   - 'click on X' / 'click X' → action='smart_click', target_text='X'\n" +
+                    "   - 'close the browser' → action='close'\n" +
+                    "   - Never for general questions or conversation topics.\n\n" +
+
+                    "3. get_browser_state — ONLY when user says 'what is on screen' or 'list the elements'. " +
+                    "   Do NOT call this before clicking. For all clicks use control_browser action='smart_click' directly.\n\n" +
+
+                    "== CLICKING ==\n" +
+                    "When user says 'click on X' or 'click X': immediately call control_browser with action='smart_click' and target_text='X'. Do not call get_browser_state first.\n\n" +
+
+                    "== AFTER ANY TOOL CALL ==\n" +
+                    "Confirm the action in one short sentence, then return to normal conversation.\n\n" +
+
+                    "== LANGUAGE ==\n" +
+                    "Always respond in the user's language. Tool parameter values must be in English.",
+
                 tools: [
-                    { googleSearch: {} },
                     {
                         functionDeclarations: [
                             {
                                 name: "get_browser_state",
-                                description: "Retrieves the current state of the browser window, including the current URL and a list of all interactive elements (buttons, links, search bars) with their IDs and text. Use this before clicking to ensure you have the correct element ID.",
+                                description: "Returns a list of all visible interactive elements on the current browser page with their IDs. Call this ONLY when the user explicitly asks what is on screen or to list elements. Do NOT call this before clicking — for all clicks use control_browser with action='smart_click' directly.",
                                 parameters: { type: "OBJECT", properties: {} }
                             },
                             {
                                 name: "control_browser",
-                                description: "Controls the internal Nova Browser window. Use this to open websites, search for products/videos/news, scroll the page, or click elements by ID.",
+                                description: "Controls Nova's browser. Use for explicit browser commands only: open (search/navigate), scroll (up/down), smart_click (click by visible text — use this for ALL clicks), search_youtube, close. For clicking always use smart_click with the visible text on screen — never call get_browser_state first. Never use for answering questions.",
                                 parameters: {
                                     type: "OBJECT",
                                     properties: {
                                         action: {
                                             type: "STRING",
-                                            enum: ["open", "scroll", "click_id", "smart_click", "search_youtube", "close"],
-                                            description: "The type of browser action to perform."
+                                            enum: ["open", "scroll", "smart_click", "search_youtube", "close"],
+                                            description: "The browser action to perform. Use smart_click for all clicks."
                                         },
                                         query: {
                                             type: "STRING",
-                                            description: "The search query or URL (used with 'open' or 'search_youtube')."
+                                            description: "URL or search query (used with 'open' or 'search_youtube')."
                                         },
                                         direction: {
                                             type: "STRING",
                                             enum: ["up", "down", "top", "bottom"],
-                                            description: "The scroll direction (used with 'scroll')."
-                                        },
-                                        element_id: {
-                                            type: "INTEGER",
-                                            description: "The ID of the element to click (obtained from get_browser_state)."
+                                            description: "Scroll direction (used with 'scroll')."
                                         },
                                         target_text: {
                                             type: "STRING",
-                                            description: "The text to fuzzy-search and click (used with 'smart_click' if ID is unknown)."
+                                            description: "Text to fuzzy-find and click (used with 'smart_click')."
                                         }
                                     },
                                     required: ["action"]
@@ -66,13 +99,13 @@ async function startLiveSession(mainWindow, automation) {
                             },
                             {
                                 name: "execute_system_command",
-                                description: "Executes a system-level command on the desktop such as opening local apps (VS Code, Terminal), controlling volume, or opening local folders.",
+                                description: "Executes a desktop/OS action. ONLY call when user explicitly requests to open, launch, start, close, or run an application. DO NOT call for questions, topics, or anything that does not require launching software. Supported apps: zoom, vscode, terminal, firefox, chrome, brave, discord, slack, spotify, vlc, gimp, blender, files, dolphin, libreoffice, calc, writer, impress, antigravity, docs, sheets, slides, drive, gmail, and any installed app. Also: increase/decrease volume, open documents/downloads/desktop folder.",
                                 parameters: {
                                     type: "OBJECT",
                                     properties: {
                                         command: {
                                             type: "STRING",
-                                            description: "The tactical command, e.g. 'open vscode', 'open terminal', 'increase volume', 'open documents folder'."
+                                            description: "Must be in English. Examples: 'open zoom', 'open terminal', 'open vscode', 'open docs', 'open sheets', 'close zoom', 'increase volume', 'open downloads folder'."
                                         }
                                     },
                                     required: ["command"]
@@ -80,16 +113,14 @@ async function startLiveSession(mainWindow, automation) {
                             }
                         ]
                     }
-                ],
-                responseModalities: [Modality.AUDIO],
-                systemInstruction: "You are Nova, an advanced multilingual AI assistant. \n\nVISION & BROWSING:\nYou have a Browser tool. \n1. To see what is on the screen, ALWAYS call 'get_browser_state' first. This gives you a list of elements with their unique IDs.\n2. Once you have the elements, use 'control_browser' with action='click_id' and the specific element_id. This is much more accurate than smart_click.\n3. Be proactive: if the user wants to buy something, suggest options, open the browser, and then use 'get_browser_state' to help them find the right item.\n4. Always speak in the user's language."
+                ]
             },
             callbacks: {
                 onopen: () => {
-                    console.log('✅ Connected to Gemini Live API (Visual Mapping Enabled)');
+                    console.log('✅ Connected to Gemini Live API');
                     mainWindow.webContents.send('live-session-event', { event: 'opened' });
                 },
-                onmessage: (message) => {
+                onmessage: async (message) => {
                     if (message.serverContent && message.serverContent.interrupted) {
                         mainWindow.webContents.send('live-session-event', { event: 'interrupted' });
                     }
@@ -107,23 +138,40 @@ async function startLiveSession(mainWindow, automation) {
                     // HANDLE TOOL CALLS
                     if (message.toolCall) {
                         for (const call of message.toolCall.functionCalls) {
-                            if (call.name === 'get_browser_state') {
-                                console.log('📁 [Tool] Requesting Browser State...');
-                                if (automationRef) automationRef.getDomMap();
 
-                                // Capture the one-time response (emitted from main.js)
-                                ipcMain.once('dom-map-available', (map) => {
-                                    console.log(`👁️ [Tool] Returning Browser State (${map?.length || 0} elements)`);
-                                    activeSession.sendRealtimeInput({
-                                        functionResponses: [{
-                                            id: call.id,
-                                            response: {
-                                                elements: (map || []).slice(0, 50),
-                                                url: "Active Page"
-                                            }
-                                        }]
+                            if (call.name === 'get_browser_state') {
+                                console.log('📁 [Tool] get_browser_state called');
+
+                                // CRITICAL: Register the listener BEFORE triggering getDomMap
+                                // to avoid the race condition where the response arrives before
+                                // the listener is set up. Timeout after 5s to unblock Gemini.
+                                const domMapPromise = new Promise((resolve) => {
+                                    const timer = setTimeout(() => {
+                                        ipcMain.removeAllListeners('dom-map-available');
+                                        console.warn('⏱️ DOM map timeout — resolving with empty');
+                                        resolve({ map: [], url: 'Timeout' });
+                                    }, 5000);
+                                    ipcMain.once('dom-map-available', (data) => {
+                                        clearTimeout(timer);
+                                        resolve(data || { map: [], url: 'Unknown' });
                                     });
                                 });
+
+                                if (automationRef) automationRef.getDomMap();
+
+                                const { map, url } = await domMapPromise;
+                                console.log(`👁️ [Tool] Browser state: ${url} (${map?.length || 0} elements)`);
+                                activeSession.sendRealtimeInput({
+                                    functionResponses: [{
+                                        id: call.id,
+                                        response: {
+                                            elements: (map || []).slice(0, 100),
+                                            url: url || 'Active Page',
+                                            info: "List of interactive elements. Use 'element_id' with control_browser action='click_id' to click one."
+                                        }
+                                    }]
+                                });
+
                             } else if (call.name === 'control_browser') {
                                 const { action, query, direction, element_id, target_text } = call.args;
                                 console.log(`🌍 [Browser Tool] Action: ${action}`);
@@ -147,23 +195,48 @@ async function startLiveSession(mainWindow, automation) {
                                 activeSession.sendRealtimeInput({
                                     functionResponses: [{
                                         id: call.id,
-                                        response: { output: `Success: Browser ${action} executed` }
+                                        response: {
+                                            status: "Complete",
+                                            message: `Browser ${action} performed. Confirm this to the user in one short sentence, then continue conversation normally.`
+                                        }
                                     }]
                                 });
+
                             } else if (call.name === 'execute_system_command') {
                                 const command = call.args.command;
                                 console.log('💻 [System Tool] Command:', command);
 
-                                if (automationRef) {
-                                    automationRef.executeCommand(command);
-                                }
+                                const nowExec = Date.now();
+                                const cmdKey = command.toLowerCase().trim();
+                                const lastTime = lastExecCommandMap.get(cmdKey) || 0;
 
-                                activeSession.sendRealtimeInput({
-                                    functionResponses: [{
-                                        id: call.id,
-                                        response: { output: `Success: System command executed` }
-                                    }]
-                                });
+                                if (nowExec - lastTime < EXEC_COOLDOWN_MS) {
+                                    console.log(`🛡️ Cooldown active for "${command}" — skipping`);
+                                    activeSession.sendRealtimeInput({
+                                        functionResponses: [{
+                                            id: call.id,
+                                            response: {
+                                                status: "Skipped",
+                                                output: "Already done recently. Do not call this again. Resume conversation."
+                                            }
+                                        }]
+                                    });
+                                } else {
+                                    lastExecCommandMap.set(cmdKey, nowExec);
+                                    if (automationRef) {
+                                        const result = await automationRef.executeCommand(command);
+                                        activeSession.sendRealtimeInput({
+                                            functionResponses: [{
+                                                id: call.id,
+                                                response: {
+                                                    status: "Complete",
+                                                    output: result || "Done.",
+                                                    message: "Task complete. Confirm in one short sentence. Do NOT call any tool again unless the user explicitly requests a new action."
+                                                }
+                                            }]
+                                        });
+                                    }
+                                }
                             }
                         }
                     }
@@ -172,7 +245,7 @@ async function startLiveSession(mainWindow, automation) {
                     console.error('❌ Gemini Live WebSocket Error:', e.message);
                     mainWindow.webContents.send('live-session-event', { event: 'error', message: e.message });
                 },
-                onclose: (e) => {
+                onclose: () => {
                     console.log('🏁 Gemini Live Session Closed.');
                     activeSession = null;
                     mainWindow.webContents.send('live-session-event', { event: 'closed' });

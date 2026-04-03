@@ -893,7 +893,14 @@ async function initOfflineVoice() {
                 return;
             }
 
-            if (window.novaState.isAwake && text.match(/\b(pause|stop|resume|volume|lower|higher|quieter|louder|increase|decrease|scroll|close)\b/i)) {
+            if (window.novaState.isAwake && text.match(/\b(pause|stop|resume|volume|lower|higher|quieter|louder|increase|decrease|scroll|close|open)\b/i)) {
+                // GEMINI LIVE SUPPRESSION: If Gemini is active, let it handle ALL intent. 
+                // Only allow volume control via Vosk if specifically needed, but for now, complete silence is safer.
+                if (window.novaState.isLiveActive) {
+                    console.log(`🛡️ Gemini Live active: Ignoring Vosk tactical command: "${text}"`);
+                    return;
+                }
+
                 console.log("⚡ Tactical Direct Command detected in Vosk (Active):", text);
                 window.novaState.lastDirectCommandTime = Date.now();
                 window.novaState.lastDirectCommandText = text;
@@ -903,6 +910,7 @@ async function initOfflineVoice() {
             }
 
             if (window.novaState.isAwake && window.novaState.pendingChoices.length > 0) {
+                if (window.novaState.isLiveActive) return; // Gemini takes priority
                 const selectionPattern = /\b(one|first|two|second|three|third|four|fourth|1|2|3|4)\b/i;
                 if (selectionPattern.test(text)) {
                     console.log("⚡ Immediate Selection detected in Vosk:", text);
@@ -1085,6 +1093,7 @@ async function initOfflineVoice() {
                         if (Date.now() - lastAudioTime > silenceDuration) {
                             if (!window.novaState.isSpeaking) {
                                 // Just a visual sleep hint, actual timeout relies on sleepTimer
+
                                 console.log("🤫 Silence detected. Waiting...");
                             }
                         }
@@ -1137,6 +1146,7 @@ function isMusicIntent(query) {
 async function getSearchSuggestions(searchTerm, hasMusicVideo) {
     const needsMusicFocus = hasMusicVideo && isMusicIntent(searchTerm);
     const searchContext = needsMusicFocus ? 'music video' : 'video';
+    if (window.novaState.isLiveActive) return;
     uiLog(`🔍 Searching for: "${searchTerm}"${needsMusicFocus ? ' [music video]' : ''}...`);
 
     try {
@@ -1208,7 +1218,12 @@ async function processCommand(cmd) {
     // DEDUPLICATION GUARD: If Gemini Live is active, we ignore legacy command parsing
     // to prevent "Double VS Code" or "Double Search" issues.
     if (window.novaState.isLiveActive) {
-        console.log('🛡️ Deduplication: Ignoring legacy processCommand while Live Session is active.');
+        console.log('🛡️ GEMINI LIVE OVERRIDE: Suppressing offline intent to prevent collisions.');
+        return;
+    }
+
+    if (window.novaState.isAwake) {
+        console.log('🛡️ WAKE OVERRIDE: Suppressing intent while Nova is in active talk mode.');
         return;
     }
 
@@ -1404,9 +1419,15 @@ async function processCommand(cmd) {
     }
 
     // ── BROWSER AGENT COMMANDS ──────────────────────────────────────────────
-    const clickMatch = normalized.match(/\b(click|press|select)\s+(on\s+)?(.+)/i);
-    if (clickMatch && !normalized.includes('select one') && !normalized.includes('select 1')) {
-        let target = clickMatch[3].trim().replace(/[.,?!]+$/, ''); // STRIP PUNCTUATION
+    if (normalized.match(/\b(click|press|select)\s+(on\s+)?(.+)/i)) {
+        // PREVENT ECHO: If we just processed a direct command, ignore this Whisper transcript of it
+        if (now - (window.novaState.lastDirectCommandTime || 0) < 3000) {
+            console.log("🛡️ Suppression: Ignoring 'click' transcript because a direct tactical command just fired.");
+            return;
+        }
+
+        const clickMatch = normalized.match(/\b(click|press|select)\s+(on\s+)?(.+)/i);
+        let target = clickMatch[3].trim().replace(/[.,?!]+$/, '');
         if (window.novaState.isSpeaking) window.speechSynthesis.cancel();
         if (target.length > 0) {
             uiLog(`🖱️ Scanning for: "${target}"...`);
@@ -1551,28 +1572,27 @@ async function processCommand(cmd) {
     - Awaiting Platform: ${window.novaState.isAwaitingPlatform ? 'YES' : 'NO'} (Topic: "${window.novaState.pendingTopic}")
     - Active Platform Context: ${window.novaState.currentPlatform || 'Desktop'}
 
-    Rules:
+    Rules (apply in order, stop at first match):
 
-    - CRITICAL: If the user is asking a question (e.g., "what's", "who is", "how do I", "why", "tell me about"), respond with: chat <original_text>
-    - If the user explicitly says "search for" or "find info on", return: search <query>
-    - IF the intent is to SEARCH for a product, buy something, or find information AND it's NOT a natural question, return: search <query>
-    - If user says "play the video", "resume the video", "pause the video" or just "play" or "pause", respond with: "play" 
-    - If user says searching intent (e.g. "search for X", "find X", "buy X", "help me search for X"), respond with: "search [query]"
-    - FIRST PRIORITY: If user says "switch to <app>", "go to <app>", "focus <app>", "bring up <app>", "open <app>" where <app> is a specific application name (examples: browser, firefox, chrome, brave, vscode, code, cursor, intellij, idea, pycharm, terminal, konsole, excel, spreadsheet, calc, libreoffice, word, writer, powerpoint, impress, files, dolphin, discord, slack, telegram, spotify, vlc, gimp, blender, obsidian, zoom), respond with: "focus <app>" where <app> is just the lowercase application name (e.g. "focus browser", "focus vscode", "focus excel", "focus intellij")
-    - SECOND PRIORITY: If user says "switch window", "switch app", "next app", "next window", "alt tab", "change app", "change window", or "switch to another" WITHOUT naming a specific application, respond with exactly: "switch window"
-    - If user asks a general question (e.g. "what's the weather", "tell me a joke", "who is", "how are you"), or if the sentence sounds like background talk (e.g. "if it doesn't show up"), respond with: "chat [original_text]"
+    1. APP LAUNCH (any language): If user says "open X", "launch X", "start X", "run X", or equivalent in any language (Spanish "abre X", French "ouvre X", Portuguese "abrir X", Chinese "打开X", etc.) where X is an application name → respond: focus <appname_english_lowercase>
+       Supported: zoom, vscode, terminal, firefox, chrome, brave, discord, slack, telegram, spotify, vlc, gimp, blender, obsidian, antigravity, docs, sheets, slides, drive, gmail, meet, files, dolphin, libreoffice, word, excel, powerpoint, and any installed app.
 
-    - If Awaiting Platform is YES and user says "google", "youtube" or "video", respond with just the platform name.
-    - If user is selecting an option (e.g. "one", "first", "second", "2") AND Choices > 0, respond with: "select [number]"
-    - If user says playing intent like "play X", "play song X", "play music video of X", "show me the video of X", "music video X", respond with: "play [full query including 'music video' if mentioned]" e.g. "play coldplay music video" or "play yellow by coldplay music video"
-    - If user says "play the video", "resume the video", "pause the video" or just "play" or "pause", respond with: "play" 
-    *   IF the intent is to SEARCH for a product, buy something, or find information (e.g. "iPhone 15", "stock prices", "how to buy X"), return: search <query>
-    - If user says searching intent (e.g. "search for X", "find X", "buy X", "help me search for X"), respond with: "search [query]"
-    - If user says "close browser", "exit browser", "close window", respond with: "close browser"
-    - If user says "stop", "pause", "wait", "hold on", "quiet", "shut up", respond with "stop". 
-    - NOTE: Do NOT return "stop" for polite greetings or goodbyes (e.g. "bye", "see you", "all right"). For those, just respond with the original text or "chat [text]".
-    - Otherwise, respond with the action: ${cleanedCmd}
-    Respond with ONLY the final command string. Do not use square brackets unless it's literally part of the command text.`;
+    2. EXPLICIT SEARCH ONLY: ONLY return "search <query>" when user EXPLICITLY uses the words "search for", "search online", "look up", "browse for", or "find online". A general question about ANY topic is NOT a search — answer it with chat instead.
+
+    3. MEDIA PLAY: If user says "play X" (song/video/music) → respond: play <query>
+
+    4. MEDIA CONTROL: If user says only "pause", "resume", or "stop" for media playback → respond: play
+
+    5. WINDOW SWITCH: If user says "switch window", "alt tab", "next window" without naming an app → respond: switch window
+
+    6. PLATFORM CHOICE: If Awaiting Platform is YES and user says "google" or "youtube" → respond with just that word.
+
+    7. SELECTION: If Choices > 0 and user picks a number (one/1/first, two/2/second, etc.) → respond: select <number>
+
+    8. DEFAULT — EVERYTHING ELSE → respond: chat <original_text>
+       This includes ALL questions and conversations: weather, news, coding help, homework, science, math, history, jokes, "how does X work", "what is X", "tell me about X", "how are you", greetings, and anything not explicitly matched above.
+
+    Respond with ONLY the final command string. No brackets unless literally part of the command.`;
 
     window.novaState.isProcessingCommand = true;
     uiLog('🤖 Thinking...');
@@ -1586,7 +1606,14 @@ async function processCommand(cmd) {
             model: 'gemini-2.0-flash',
             contents: interpretationPrompt,
             config: {
-                systemInstruction: `You are a command interpreter. AVAILABLE ACTIONS: - "see [original text]" (visual intent) - "select [number]" (ONLY if options > 0) - "search [video/link] [query]" - "play [song name]" - "focus [app name]" (switch to/open a specific app) - "switch window" (cycle to next window, NO specific app). Respond with ONLY the command.`,
+                systemInstruction: `You are a voice command classifier. Output ONLY one of these, nothing else:
+"focus <appname>" — user wants to open/switch to an app (any language)
+"play <query>" — user wants to play music or video
+"search <query>" — ONLY when user explicitly says "search for", "look up", "browse for", or "find online"
+"switch window" — cycle windows, no specific app named
+"select <n>" — pick numbered option (only if choices exist)
+"chat <text>" — DEFAULT for ALL questions, conversations, knowledge requests, greetings, weather, news, coding help, homework, science, math, jokes, and anything not matching the above
+When in doubt: chat <text>`,
                 temperature: 0.1,
                 maxOutputTokens: 50
             }
@@ -1602,156 +1629,88 @@ async function processCommand(cmd) {
 
         console.log('🤖 Interpreted command:', interpretedCommand);
         uiLog(`🤖 Interpreted: "${interpretedCommand}"`);
-        // Command type detection
-        const automationKeywords = ['open', 'search', 'youtube', 'browser', 'folder', 'vscode', 'cursor', 'antigravity', 'terminal', 'files', 'chrome', 'firefox', 'google', 'twitter', 'instagram', 'facebook', 'github', 'linkedin', 'click', 'video', 'link', 'directory', 'dir', 'play', 'song', 'switch', 'alt tab', 'focus', 'volume'];
-        const selectionKeywords = ['select', 'first', 'second', 'third', 'one', 'two', 'three', 'choice', 'option', '1', '2', '3'];
 
-        let isAutomationCommand = automationKeywords.some(keyword => interpretedCommand.includes(keyword));
+        // ── STRUCTURED COMMAND ROUTING ─────────────────────────────────────
+        // Gemini returns structured prefixes: focus / play / search / switch window / select / chat
 
-        // Selection handling
-        if (window.novaState.pendingChoices.length > 0 && selectionKeywords.some(kw => interpretedCommand.includes(kw))) {
-            isAutomationCommand = true;
-        }
-
-        // Platform handling
-        if (window.novaState.isAwaitingPlatform) {
-            if (interpretedCommand.includes('google') || interpretedCommand.includes('youtube') || interpretedCommand.includes('search')) {
-                isAutomationCommand = true;
-            }
-        }
-
-        // Check if it's a question or conversation
-        const questionWords = ['what', 'how', 'why', 'when', 'where', 'who', 'can you', 'could you', 'would you', 'should i', 'recommend', 'suggest', 'tell me', 'explain', 'do you', 'are there', 'what\'s'];
-        const isQuestion = questionWords.some(word => interpretedCommand.includes(word));
-
-        // PRIORITIZE QUESTIONS: Even if it's tagged as automation (like "search"),
-        // if it looks like a question and doesn't explicitly have the "search" verb in interpretedCommand
-        const explicitSearch = interpretedCommand.startsWith('search');
-
-        if (isQuestion && (!isAutomationCommand || !explicitSearch)) {
+        // 1. APP LAUNCH
+        if (interpretedCommand.startsWith('focus ')) {
+            const appName = interpretedCommand.replace(/^focus\s+/, '').trim();
+            const resultMsg = await ipcRenderer.invoke('focus-app', appName);
             window.novaState.isProcessingCommand = false;
-            await askNova(cmd);
+            await speak(resultMsg);
             return;
         }
 
-        const normalizedCmd = interpretedCommand
-            .replace(/you tube|youtube|you toob|utube/gi, 'youtube')
-            .replace(/google search|google/gi, 'google');
-
-        if (isAutomationCommand) {
-            // Selection Logic
-            if (window.novaState.pendingChoices.length > 0 && selectionKeywords.some(kw => normalizedCmd.includes(kw))) {
-                let index = -1;
-
-                // Try digit extraction first (select 1, option 2)
-                const digitMatch = normalizedCmd.match(/\d+/);
-                if (digitMatch) {
-                    index = parseInt(digitMatch[0]) - 1;
-                } else {
-                    // Fallback to word matching
-                    if (normalizedCmd.includes('first') || normalizedCmd.includes('one')) index = 0;
-                    else if (normalizedCmd.includes('second') || normalizedCmd.includes('two')) index = 1;
-                    else if (normalizedCmd.includes('third') || normalizedCmd.includes('three')) index = 2;
-                }
-
-                if (index >= 0 && index < window.novaState.pendingChoices.length) {
-                    processSelection(window.novaState.pendingChoices[index]);
-                    return;
-                }
-            }
-
-
-
-            // Platform Choice
-            if (window.novaState.isAwaitingPlatform && (normalizedCmd.includes('google') || normalizedCmd.includes('youtube') || normalizedCmd.includes('video'))) {
-                const platform = (normalizedCmd.includes('youtube') || normalizedCmd.includes('video')) ? 'youtube' : 'google';
+        // 2. PLATFORM CHOICE (pending google/youtube selection)
+        if (window.novaState.isAwaitingPlatform) {
+            const plat = interpretedCommand.trim();
+            if (plat === 'google' || plat === 'youtube' || plat === 'video') {
+                const platform = (plat === 'youtube' || plat === 'video') ? 'youtube' : 'google';
                 await ipcRenderer.invoke('browser-search', { platform, query: window.novaState.pendingTopic });
                 window.novaState.isAwaitingPlatform = false;
                 window.novaState.isProcessingCommand = false;
                 hideChoices();
-
-                // Auto-play YouTube
                 if (platform === 'youtube') {
-                    console.log("📺 Auto-playing YouTube video...");
-                    setTimeout(async () => {
-                        await ipcRenderer.invoke('execute-automation', 'press-k');
-                    }, 5000);
+                    setTimeout(async () => { await ipcRenderer.invoke('execute-automation', 'press-k'); }, 5000);
                 }
                 return;
             }
-
-            // Search/Play
-            if (normalizedCmd.includes('search') || normalizedCmd.includes('play')) {
-                ipcRenderer.invoke('stop-media'); // confirmed automation intent, stop current media
-                // Preserve 'music video' as a unit before stripping other words
-                const hasMusicVideo = /music video/i.test(normalizedCmd);
-                let searchTerm = normalizedCmd
-                    .replace(/\b(search|play|link|the|this|that|it)\b/gi, '') // keep 'video','music'
-                    .trim();
-                // If user didn't say 'music video' but only said 'video', strip it
-                if (!hasMusicVideo) {
-                    searchTerm = searchTerm.replace(/\bvideo\b/gi, '').trim();
-                }
-                if (!searchTerm && normalizedCmd.includes('play')) {
-                    await ipcRenderer.invoke('play-media');
-                    await speak("Resuming playback.");
-                    window.novaState.isProcessingCommand = false;
-                    return;
-                }
-
-                // If the only word left is "the" or similar, it's a resume/vision failure fallback
-                if (!searchTerm || searchTerm.length < 2) {
-                    await ipcRenderer.invoke('play-media');
-                    await speak("Resuming playback.");
-                    window.novaState.isProcessingCommand = false;
-                    return;
-                }
-
-                const isVideo = hasMusicVideo || (normalizedCmd.includes('play') && isMusicIntent(searchTerm)) || normalizedCmd.includes('video') || normalizedCmd.includes('music');
-
-                // UNIFIED BROWSER ROUTING: Always use the internal agent
-                const platform = isVideo ? 'youtube' : 'google';
-                uiLog(`🌐 Browser Agent: ${platform} for "${searchTerm}"...`);
-                speak(`Opening ${platform} for ${searchTerm}.`);
-                ipcRenderer.invoke('browser-open', { platform, query: searchTerm });
-
-                window.novaState.isProcessingCommand = false;
-                return;
-            }
-
-            // App-Specific Focus / Launch ("switch to browser", "switch to vscode", etc.)
-            if (normalizedCmd.startsWith('focus ')) {
-                const appName = normalizedCmd.replace(/^focus\s+/, '').trim();
-                const resultMsg = await ipcRenderer.invoke('focus-app', appName);
-                window.novaState.isProcessingCommand = false;
-                await speak(resultMsg);
-                return;
-            }
-
-            // Window Switching (Alt+Tab)
-            if (normalizedCmd.includes('switch') || normalizedCmd.includes('alt tab')) {
-                await ipcRenderer.invoke('switch-window');
-                window.novaState.isProcessingCommand = false;
-                await speak('Switching to the next window.');
-                return;
-            }
-
-            // Direct Automation
-            ipcRenderer.invoke('stop-media'); // Stop media for direct commands
-            const resp = await ipcRenderer.invoke('execute-automation', normalizedCmd);
-            window.novaState.isProcessingCommand = false;
-            await speak(resp);
-        } else {
-            window.novaState.isProcessingCommand = false;
-            await askNova(cmd);
         }
+
+        // 3. SELECTION
+        if (interpretedCommand.startsWith('select ') && window.novaState.pendingChoices.length > 0) {
+            const numStr = interpretedCommand.replace(/^select\s+/, '').trim();
+            const wordMap = { one: 0, first: 0, '1': 0, two: 1, second: 1, '2': 1, three: 2, third: 2, '3': 2, four: 3, fourth: 3, '4': 3 };
+            const parsed = parseInt(numStr);
+            const index = !isNaN(parsed) ? parsed - 1 : (wordMap[numStr] !== undefined ? wordMap[numStr] : -1);
+            if (index >= 0 && index < window.novaState.pendingChoices.length) {
+                processSelection(window.novaState.pendingChoices[index]);
+                return;
+            }
+        }
+
+        // 4. MEDIA PLAY
+        if (interpretedCommand.startsWith('play ') || interpretedCommand === 'play') {
+            const query = interpretedCommand.replace(/^play\s*/, '').trim();
+            if (!query) {
+                await ipcRenderer.invoke('play-media');
+                await speak("Resuming playback.");
+            } else {
+                speak(`Playing ${query}.`);
+                ipcRenderer.invoke('browser-open', { platform: 'youtube', query });
+            }
+            window.novaState.isProcessingCommand = false;
+            return;
+        }
+
+        // 5. EXPLICIT SEARCH (only when Gemini classified it as search)
+        if (interpretedCommand.startsWith('search ')) {
+            const query = interpretedCommand.replace(/^search\s+/, '').trim();
+            if (query) {
+                speak(`Searching for ${query}.`);
+                ipcRenderer.invoke('browser-open', { platform: 'google', query });
+            }
+            window.novaState.isProcessingCommand = false;
+            return;
+        }
+
+        // 6. WINDOW SWITCH
+        if (interpretedCommand === 'switch window' || interpretedCommand.startsWith('switch window')) {
+            await ipcRenderer.invoke('switch-window');
+            await speak('Switching to the next window.');
+            window.novaState.isProcessingCommand = false;
+            return;
+        }
+
+        // 7. DEFAULT → conversation (covers all questions, weather, news, coding, homework, etc.)
+        window.novaState.isProcessingCommand = false;
+        await askNova(cmd);
+
     } catch (error) {
         window.novaState.isProcessingCommand = false;
         console.error('interpretation error:', error);
-        // If it was a search/play, don't fallback to chat, just reset
-        if (!cmd.match(/\b(search|play)\b/i)) {
-            await askNova(cmd);
-        }
+        await askNova(cmd);
     }
 
     subtitleElement.innerText = "";

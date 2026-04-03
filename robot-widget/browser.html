@@ -38,18 +38,9 @@
         }
 
         @keyframes pulse {
-            0% {
-                opacity: 0.6;
-            }
-
-            50% {
-                opacity: 1;
-                transform: scale(1.1);
-            }
-
-            100% {
-                opacity: 0.6;
-            }
+            0% { opacity: 0.6; }
+            50% { opacity: 1; transform: scale(1.1); }
+            100% { opacity: 0.6; }
         }
 
         #browser-container {
@@ -75,7 +66,7 @@
     <div id="browser-header">
         <div id="status-dot"></div>
         NOVA BROWSER AGENT
-        <div id="url-display" id="current-url">Loading...</div>
+        <div id="url-display">Loading...</div>
     </div>
     <div id="browser-container">
         <webview id="main-webview" src="about:blank" allowpopups></webview>
@@ -94,6 +85,11 @@
             urlDisplay.innerText = webview.getURL();
         });
 
+        // Send ready signal to main process
+        window.addEventListener('DOMContentLoaded', () => {
+            ipcRenderer.send('browser-ready');
+        });
+
         // ── NAVIGATION ───────────────────────────────────────────────────────
         ipcRenderer.on('navigate', (event, url) => {
             console.log('🌐 Browser: Navigating to', url);
@@ -102,12 +98,20 @@
 
         // ── SCROLLING ────────────────────────────────────────────────────────
         ipcRenderer.on('scroll', (event, direction) => {
-            const amount = direction === 'down' ? 500 : -500;
+            let script;
+            if (direction === 'top') {
+                script = `window.scrollTo({ top: 0, behavior: 'smooth' })`;
+            } else if (direction === 'bottom') {
+                script = `window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' })`;
+            } else {
+                const amount = direction === 'down' ? 600 : -600;
+                script = `window.scrollBy({ top: ${amount}, behavior: 'smooth' })`;
+            }
             console.log('📜 Browser: Scrolling', direction);
-            webview.executeJavaScript(`window.scrollBy({ top: ${amount}, behavior: 'smooth' })`).catch(console.error);
+            webview.executeJavaScript(script).catch(console.error);
         });
 
-        // ── DOM MAPPING (Smart Click) ────────────────────────────────────────
+        // ── DOM MAPPING ──────────────────────────────────────────────────────
         ipcRenderer.on('get-dom-map', (event) => {
             console.log('🧠 Browser: Generating DOM Map...');
             webview.executeJavaScript(`
@@ -132,98 +136,134 @@
                         });
                 })()
             `).then(map => {
-                ipcRenderer.send('dom-map-results', map);
+                ipcRenderer.send('dom-map-results', { map, url: webview.getURL() });
             }).catch(err => {
                 console.error('❌ DOM Map Error:', err);
-                ipcRenderer.send('dom-map-results', []);
+                ipcRenderer.send('dom-map-results', { map: [], url: webview.getURL() });
             });
         });
 
-        // ── CLICKING ─────────────────────────────────────────────────────────
+        // ── CLICK BY ID ──────────────────────────────────────────────────────
         ipcRenderer.on('click-by-id', (event, id) => {
-            console.log('🖱️ Browser: Clicking by ID', id);
+            console.log('🖱️ Browser: Clicking by ID', id, typeof id);
             webview.executeJavaScript(`
                 (function() {
                     const el = document.querySelector('[nova-id="${id}"]');
-                    if (el) {
-                        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        
-                        // Visual ripple
-                        const rect = el.getBoundingClientRect();
-                        const x = rect.left + rect.width / 2;
-                        const y = rect.top + rect.height / 2;
-                        const ripple = document.createElement('div');
-                        ripple.style.cssText = 'position:fixed; z-index:999999; border: 4px solid #0ff; border-radius:50%; pointer-events:none; width:60px; height:60px; left:'+(x-30)+'px; top:'+(y-30)+'px; transition: all 0.4s; opacity:1; transform:scale(0.3);';
-                        document.body.appendChild(ripple);
-                        
-                        setTimeout(() => { 
-                            ripple.style.transform = 'scale(1.5)'; 
-                            ripple.style.opacity = '0'; 
-                        }, 10);
-                        
-                        setTimeout(() => { 
-                            ripple.remove(); 
-                            // Try multiple click methods for robustness
-                            el.focus();
-                            el.click();
-                            
-                            // Fallback for elements that need pointer events
-                            const mouseEvent = new MouseEvent('click', {
-                                view: window,
-                                bubbles: true,
-                                cancelable: true
-                            });
-                            el.dispatchEvent(mouseEvent);
-                        }, 400);
-                        return true;
+                    console.log('[Nova click-by-id] id=${id}, found:', el ? el.tagName : 'NULL');
+                    if (!el) {
+                        // Fallback: index into the full clickable list
+                        const all = Array.from(document.querySelectorAll(
+                            'button,a,input,[role="button"],[onclick],h3,.ytp-ad-skip-button,ytd-thumbnail,ytd-video-renderer,img'
+                        )).filter(e => { const r=e.getBoundingClientRect(); return r.width>1&&r.height>1; });
+                        const fallback = all[${id}];
+                        console.log('[Nova click-by-id] fallback at index ${id}:', fallback ? fallback.tagName : 'NULL');
+                        if (!fallback) return 'NOT_FOUND';
+                        fallback.scrollIntoView({ behavior: 'auto', block: 'center' });
+                        try { fallback.focus(); } catch(_) {}
+                        try { fallback.click(); } catch(_) {}
+                        try { fallback.dispatchEvent(new MouseEvent('click', { bubbles:true, cancelable:true, view:window })); } catch(_) {}
+                        return 'FALLBACK_CLICKED';
                     }
-                    return false;
+
+                    el.scrollIntoView({ behavior: 'auto', block: 'center' });
+
+                    // Ripple effect
+                    const rect = el.getBoundingClientRect();
+                    const x = rect.left + rect.width / 2;
+                    const y = rect.top + rect.height / 2;
+                    const ripple = document.createElement('div');
+                    ripple.style.cssText = 'position:fixed;z-index:999999;border:4px solid #0ff;border-radius:50%;pointer-events:none;width:60px;height:60px;left:'+(x-30)+'px;top:'+(y-30)+'px;transition:all 0.4s;opacity:1;transform:scale(0.3);box-shadow:0 0 12px #0ff;';
+                    document.body.appendChild(ripple);
+                    setTimeout(() => { ripple.style.transform = 'scale(1.5)'; ripple.style.opacity = '0'; }, 10);
+                    setTimeout(() => ripple.remove(), 500);
+
+                    // Fire DOM events immediately (scroll is instant via 'auto')
+                    try { el.focus(); } catch(_) {}
+                    try { el.click(); } catch(_) {}
+                    try { el.dispatchEvent(new MouseEvent('mousedown', { bubbles:true, cancelable:true, view:window })); } catch(_) {}
+                    try { el.dispatchEvent(new MouseEvent('mouseup',   { bubbles:true, cancelable:true, view:window })); } catch(_) {}
+                    try { el.dispatchEvent(new MouseEvent('click',     { bubbles:true, cancelable:true, view:window })); } catch(_) {}
+                    return 'CLICKED';
                 })()
-            `).catch(console.error);
+            `).then(res => {
+                console.log('🖱️ click-by-id result:', res);
+            }).catch(err => {
+                console.error('🖱️ click-by-id ERROR:', err);
+            });
         });
 
+        // ── SMART CLICK (by text) ─────────────────────────────────────────────
         ipcRenderer.on('smart-click', (event, targetText) => {
             console.log('🖱️ Browser: Smart clicking for', targetText);
-            const escapedText = JSON.stringify(targetText);
+            const escapedText = JSON.stringify(String(targetText).toLowerCase().trim());
             webview.executeJavaScript(`
                 (function() {
-                    const lowerText = ${escapedText}.toLowerCase().trim();
-                    // Include more tags for search on complex sites
-                    const elements = Array.from(document.querySelectorAll('button, a, input, [role="button"], [onclick], h3, .ytp-ad-skip-button, ytd-thumbnail, ytd-video-renderer, ytd-grid-video-renderer, span, div, img'));
-                    
-                    const match = elements.find(el => {
-                        const t = (el.innerText || el.title || el.ariaLabel || el.alt || "").toLowerCase().trim();
-                        // Priority 1: Exact match
-                        if (t === lowerText) return true;
-                        // Priority 2: Title contains target and is short (likely a button/link)
-                        if (t.includes(lowerText) && t.length < 100) return true;
-                        return false;
-                    });
+                    const q = ${escapedText};
+                    const words = q.split(/\\s+/).filter(w => w.length > 1);
+                    const candidates = Array.from(document.querySelectorAll(
+                        'button, a, input, [role="button"], [onclick], h3, nav *, header *, [aria-label], [data-testid], [class*="menu"], [class*="nav"], [class*="toggle"], [class*="hamburger"]'
+                    )).filter(e => { const r=e.getBoundingClientRect(); return r.width>1&&r.height>1; });
 
-                    if (match) {
-                        // Click the element or its nearest interactive parent
-                        const clickTarget = match.closest('a, button, [role="button"]') || match;
-                        console.log('🎯 Smart-Click Match Found:', clickTarget.tagName);
-                        
-                        // Flash the element briefly
-                        const oldOutline = clickTarget.style.outline;
-                        clickTarget.style.outline = '3px solid #0ff';
-                        setTimeout(() => clickTarget.style.outline = oldOutline, 500);
+                    const getAttrs = (el) => [
+                        el.innerText,
+                        el.textContent,
+                        el.getAttribute('aria-label'),
+                        el.title,
+                        el.placeholder,
+                        el.getAttribute('data-testid'),
+                        el.getAttribute('data-label'),
+                        el.getAttribute('data-tooltip'),
+                        el.getAttribute('name'),
+                        el.id,
+                        el.getAttribute('class')   // getAttribute avoids SVGAnimatedString on SVG nodes
+                    ].map(v => String(v || '')).join(' ').toLowerCase();
 
-                        clickTarget.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        
-                        // Execute click with longer delay for scroll settling
-                        setTimeout(() => {
-                            clickTarget.click();
-                            // Fallback Dispatch
-                            const evt = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
-                            clickTarget.dispatchEvent(evt);
-                        }, 500);
-                        return true;
+                    const score = (el) => {
+                        const t = getAttrs(el).trim();
+                        if (!t) return 0;
+                        if (t === q) return 100;
+                        if (t.startsWith(q)) return 90;
+                        if (t.includes(q)) return 80;
+                        const matched = words.filter(w => t.includes(w)).length;
+                        if (matched === words.length && words.length > 0) return 70;
+                        if (matched > 0) return matched * 20;
+                        return 0;
+                    };
+
+                    let best = null, bestScore = 0;
+                    for (const el of candidates) {
+                        const s = score(el);
+                        if (s > bestScore) { bestScore = s; best = el; }
                     }
-                    return false;
+
+                    // Last-resort: if still nothing, search ALL elements for any attribute match
+                    if (!best || bestScore === 0) {
+                        const all = Array.from(document.querySelectorAll('*')).filter(e => {
+                            const r = e.getBoundingClientRect();
+                            return r.width > 1 && r.height > 1;
+                        });
+                        for (const el of all) {
+                            const s = score(el);
+                            if (s > bestScore) { bestScore = s; best = el; }
+                        }
+                    }
+
+                    console.log('[Nova smart-click] query:"' + q + '" bestScore:' + bestScore + ' el:', best ? best.tagName + ' class="' + (best.className||'').substring(0,40) + '" label="' + (best.getAttribute('aria-label')||'') + '"' : 'NULL');
+                    if (!best || bestScore === 0) return 'NOT_FOUND';
+
+                    best.scrollIntoView({ behavior: 'auto', block: 'center' });
+                    try { best.focus(); } catch(_) {}
+                    try { best.click(); } catch(_) {}
+                    try { best.dispatchEvent(new MouseEvent('mousedown', { bubbles:true, cancelable:true, view:window })); } catch(_) {}
+                    try { best.dispatchEvent(new MouseEvent('mouseup',   { bubbles:true, cancelable:true, view:window })); } catch(_) {}
+                    try { best.dispatchEvent(new MouseEvent('click',     { bubbles:true, cancelable:true, view:window })); } catch(_) {}
+                    return 'CLICKED:' + best.tagName + ':score=' + bestScore + ':' + (best.getAttribute('aria-label') || best.innerText || best.className || '').substring(0,30);
                 })()
-            `).catch(console.error);
+            `).then(res => {
+                console.log('🖱️ smart-click result:', res);
+            }).catch(err => {
+                console.error('🖱️ smart-click ERROR:', err);
+            });
         });
     </script>
 </body>
