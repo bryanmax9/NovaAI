@@ -27,7 +27,9 @@ window.novaState = {
     isInConversation: false,
     isSilenced: false,
     lastDirectCommandTime: 0,
-    lastDirectCommandText: ''
+    lastDirectCommandText: '',
+    isResearching: false,
+    researchJustCompleted: 0
 };
 
 window.novaVoice = {
@@ -659,6 +661,121 @@ function hideChoices() {
     window.novaState.pendingChoices = []; // CRITICAL: Clear choices state
 }
 
+// ── Research Paper Overlay ────────────────────────────────────────────────
+
+let researchOverlay = null;
+
+function showResearchOverlay(topic) {
+    if (!researchOverlay) {
+        researchOverlay = document.createElement('div');
+        researchOverlay.id = 'research-overlay';
+        document.body.appendChild(researchOverlay);
+    }
+    researchOverlay.style.cssText = `
+        position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(0, 4, 18, 0.93);
+        border: 1px solid rgba(0, 200, 255, 0.35);
+        border-radius: 8px;
+        display: flex; flex-direction: column;
+        align-items: center; justify-content: center;
+        z-index: 9999; padding: 18px;
+        box-shadow: 0 0 25px rgba(0, 180, 255, 0.18), inset 0 0 18px rgba(0, 0, 40, 0.6);
+    `;
+    researchOverlay.innerHTML = `
+        <style>
+            @keyframes nova-spin { to { transform: rotate(360deg); } }
+            @keyframes nova-spin-r { to { transform: rotate(-360deg); } }
+            @keyframes nova-pulse { 0%,100%{opacity:1;} 50%{opacity:0.35;} }
+            @keyframes nova-bar { 0%{width:0%} 100%{width:100%} }
+        </style>
+        <div style="position:relative;width:48px;height:48px;margin-bottom:14px;flex-shrink:0;">
+            <div style="width:48px;height:48px;border:3px solid rgba(0,220,255,0.15);border-top:3px solid #0df;border-radius:50%;animation:nova-spin 1.1s linear infinite;position:absolute;"></div>
+            <div style="width:32px;height:32px;border:2px solid rgba(0,200,255,0.1);border-bottom:2px solid #0af;border-radius:50%;animation:nova-spin-r 0.75s linear infinite;position:absolute;top:8px;left:8px;"></div>
+        </div>
+        <div style="color:#0df;font-family:monospace;font-size:12px;font-weight:bold;letter-spacing:2px;text-shadow:0 0 8px #0df;animation:nova-pulse 2s ease-in-out infinite;margin-bottom:6px;text-align:center;">
+            RESEARCHING
+        </div>
+        <div style="color:#aaa;font-family:monospace;font-size:9px;text-align:center;margin-bottom:10px;max-width:200px;line-height:1.5;word-break:break-word;font-style:italic;">
+            "${topic}"
+        </div>
+        <div id="nova-research-status" style="color:#7bc;font-family:monospace;font-size:9px;text-align:center;max-width:210px;line-height:1.6;min-height:36px;word-break:break-word;">
+            Initializing research engines...
+        </div>
+        <div style="width:180px;height:2px;background:rgba(0,200,255,0.12);border-radius:1px;margin-top:12px;overflow:hidden;">
+            <div style="height:100%;background:linear-gradient(90deg,#0af,#0df);border-radius:1px;animation:nova-bar 3s ease-in-out infinite alternate;"></div>
+        </div>
+        <div style="margin-top:10px;color:rgba(255,140,0,0.65);font-family:monospace;font-size:8px;text-align:center;letter-spacing:1px;">
+            VOICE PAUSED &bull; RESEARCH IN PROGRESS
+        </div>
+    `;
+    researchOverlay.style.display = 'flex';
+}
+
+function updateResearchStatus(message) {
+    const el = document.getElementById('nova-research-status');
+    if (el) el.innerText = message;
+}
+
+function hideResearchOverlay() {
+    if (researchOverlay) {
+        researchOverlay.style.display = 'none';
+    }
+}
+
+// IPC: Research paper lifecycle events
+ipcRenderer.on('research-paper-started', (event, { topic }) => {
+    window.novaState.isResearching = true;
+    stopAllPlayback();
+    showResearchOverlay(topic);
+    listeningSymbol.style.display = 'none';
+    subtitleElement.style.display = 'none';
+    uiLog(`📄 Research started: "${topic}"`);
+});
+
+ipcRenderer.on('research-paper-progress', (event, { step, detail }) => {
+    // Show overlay in case it wasn't shown yet (fallback)
+    if (window.novaState.isResearching) {
+        updateResearchStatus(detail);
+    }
+    uiLog(`📄 ${detail}`);
+});
+
+ipcRenderer.on('research-paper-done', (event, data) => {
+    window.novaState.isResearching = false;
+    window.novaState.researchJustCompleted = Date.now(); // 60-second cooldown
+    window.novaState.isProcessingCommand = false;
+    window.novaState.isAwaitingPlatform = false;
+    hideResearchOverlay();
+    subtitleElement.style.display = '';  // Restore subtitle visibility
+    listeningSymbol.style.display = 'block';
+
+    if (data.success) {
+        const name = data.fileName || 'the research paper';
+        uiLog(`✅ Research paper saved: ${name}`);
+        // Route through Gemini Live if active so the conversation pipeline stays alive.
+        // Small delay lets the audio gate (isResearching=false) open before we send.
+        setTimeout(() => {
+            if (window.novaState.isLiveActive) {
+                // Inject as text input — Gemini Live will reply vocally and naturally
+                ipcRenderer.send('live-text-chunk',
+                    `[PAPER DONE] Research paper "${name}" is complete and saved on the desktop. Tell the user in one sentence their paper is ready to read, then ask what else they need. Do NOT call any tools. Do NOT close anything. Just speak.`
+                );
+            } else {
+                // Live session timed out during the long research — restart it then speak
+                speak(`Research paper complete. It has been saved to your desktop and opened in my browser. I am ready to help with anything else.`);
+                // Restart Gemini Live so future voice commands still work
+                setTimeout(() => {
+                    ipcRenderer.send('live-start');
+                    uiLog('🔄 Restarting Gemini Live after research completion.');
+                }, 1500);
+            }
+        }, 600);
+    } else {
+        uiLog(`❌ Research paper failed: ${data.error || 'Unknown error'}`);
+        speak(`I ran into a problem generating the research paper. Please try again.`);
+    }
+});
+
 async function analyzeScreen(userText) {
     try {
         uiLog('📸 Capturing screen for vision analysis...');
@@ -692,7 +809,7 @@ async function analyzeScreen(userText) {
         const base64Image = screenshot.replace(/^data:image\/\w+;base64,/, '');
 
         const response = await ai.models.generateContent({
-            model: 'gemini-2.0-flash',
+            model: 'gemini-2.5-flash',
             contents: [{
                 parts: [
                     { inlineData: { mimeType: 'image/png', data: base64Image } },
@@ -760,7 +877,7 @@ async function initOfflineVoice() {
                 window.novaState.isInConversation = false;
                 uiLog("💤 Entered Sleep Mode");
                 ipcRenderer.send('live-end');
-            }, 30000); // Longer timeout for conversations
+            }, 300000); // 5 minutes — keeps session alive during long conversations
         };
 
         const endConversation = () => {
@@ -1026,6 +1143,15 @@ async function initOfflineVoice() {
             if (status.event === 'closed') {
                 window.novaState.isLiveActive = false;
                 uiLog("⚪ [LIVE] Bi-directional mode ended");
+                // Auto-reconnect if the user is still awake — the session dropped unexpectedly
+                if (window.novaState.isAwake && !window.novaState.isResearching) {
+                    uiLog("🔄 Session dropped — reconnecting in 2s...");
+                    setTimeout(() => {
+                        if (window.novaState.isAwake && !window.novaState.isLiveActive) {
+                            ipcRenderer.send('live-start');
+                        }
+                    }, 2000);
+                }
             }
             if (status.event === 'interrupted') {
                 audioQueue = []; // Clear queue on interrupt
@@ -1092,15 +1218,18 @@ async function initOfflineVoice() {
                     } else {
                         if (Date.now() - lastAudioTime > silenceDuration) {
                             if (!window.novaState.isSpeaking) {
-                                // Just a visual sleep hint, actual timeout relies on sleepTimer
-
-                                console.log("🤫 Silence detected. Waiting...");
+                                // Just a visual sleep hint — log at most once every 10s to avoid spam
+                                if (!window._lastSilenceLog || Date.now() - window._lastSilenceLog > 10000) {
+                                    console.log("🤫 Silence detected. Waiting...");
+                                    window._lastSilenceLog = Date.now();
+                                }
                             }
                         }
                     }
 
                     // Route out Float32 PCM arrays into 16kHz Int16 for Gemini
-                    if (!window.novaState.isSpeaking) {
+                    // Block audio during research so Nova isn't interrupted by voice commands
+                    if (!window.novaState.isSpeaking && !window.novaState.isResearching) {
                         const pcm = new Int16Array(data.length);
                         for (let i = 0; i < data.length; i++) {
                             let s = Math.max(-1, Math.min(1, data[i]));
@@ -1214,6 +1343,46 @@ async function processCommand(cmd) {
         subtitleElement.style.color = '#fff';
         return;
     }
+
+    // ── RESEARCH PAPER BLOCK: block all commands while research is running ──
+    if (window.novaState.isResearching) {
+        console.log('📄 Research in progress — ignoring command:', cmd);
+        return;
+    }
+
+    // ── RESEARCH PAPER DETECTION: catch research paper requests early ───────
+    // Skip detection for 10 minutes after a paper just completed to prevent re-triggering
+    const _researchCooldownElapsed = Date.now() - (window.novaState.researchJustCompleted || 0);
+    if (_researchCooldownElapsed > 600000) {
+    const normalized_rp = cmd.toLowerCase().trim();
+        const researchMatch =
+            normalized_rp.match(/\b(?:write|create|generate|make|build|prepare|do|compose)\b.*?\b(?:research\s+paper|academic\s+paper|scientific\s+paper|research\s+essay|research\s+report)\b.*?\b(?:about|on|regarding|covering|for|of)\b\s*(.+)/i)
+            || normalized_rp.match(/\b(?:write|create|generate|make|compose)\b.*?\b(?:paper|essay|report)\b.*?\b(?:about|on|regarding)\b\s*(.+)/i)
+            || normalized_rp.match(/\b(?:research|academic)\s+paper\b\s+(?:about|on|for|regarding)\s+(.+)/i)
+            || normalized_rp.match(/\b(?:research\s+paper|academic\s+paper)\b.*?\bon\s+(.+)/i);
+
+        if (researchMatch) {
+            const rawTopic = researchMatch[1] || researchMatch[0];
+            // Clean trailing noise words
+            const topic = rawTopic
+                .replace(/\b(please|for me|now|today|quickly|asap|right now)\b/gi, '')
+                .replace(/[?!.,]+$/, '')
+                .trim();
+
+            if (topic.length > 2) {
+                console.log(`📄 Research paper detected! Topic: "${topic}"`);
+                window.novaState.isResearching = true;
+                stopAllPlayback();
+                showResearchOverlay(topic);
+                listeningSymbol.style.display = 'none';
+                subtitleElement.style.display = 'none';
+                uiLog(`📄 Starting research on: "${topic}"`);
+                speak(`Starting research on ${topic}. Please wait while I compile a comprehensive paper — this may take a couple of minutes.`);
+                ipcRenderer.invoke('generate-research-paper', topic);
+                return;
+            }
+        }
+    } // end cooldown if
 
     // DEDUPLICATION GUARD: If Gemini Live is active, we ignore legacy command parsing
     // to prevent "Double VS Code" or "Double Search" issues.
@@ -1603,7 +1772,8 @@ async function processCommand(cmd) {
         const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
         const response = await ai.models.generateContent({
-            model: 'gemini-2.0-flash',
+            model: 'gemini-2.5-flash',
+
             contents: interpretationPrompt,
             config: {
                 systemInstruction: `You are a voice command classifier. Output ONLY one of these, nothing else:

@@ -34,7 +34,7 @@ async function startLiveSession(mainWindow, automation) {
                     "For ANY question or topic, respond verbally with your own knowledge. NEVER open a browser or run a command just to answer a question.\n\n" +
 
                     "== TOOL USAGE: STRICT TRIGGER RULES ==\n" +
-                    "You have three tools. Use them ONLY when the user gives a direct action command:\n\n" +
+                    "You have four tools. Use them ONLY when the user gives a direct, unambiguous action command. NEVER call a tool because the user mentioned a topic.\n\n" +
 
                     "1. execute_system_command — ONLY when user explicitly says 'open', 'launch', 'start', 'close', or 'run' followed by an app name.\n" +
                     "   - Triggers: 'open zoom', 'launch terminal', 'close spotify', 'open docs'\n" +
@@ -51,6 +51,15 @@ async function startLiveSession(mainWindow, automation) {
 
                     "3. get_browser_state — ONLY when user says 'what is on screen' or 'list the elements'. " +
                     "   Do NOT call this before clicking. For all clicks use control_browser action='smart_click' directly.\n\n" +
+
+                    "4. create_research_paper — EXTREMELY STRICT. This tool takes several minutes and cannot be cancelled.\n" +
+                    "   ONLY call it when ALL of these conditions are met simultaneously:\n" +
+                    "   a) The user used an explicit creation verb: 'write', 'create', 'generate', 'make', 'build', 'compose', or 'prepare'\n" +
+                    "   b) The user explicitly said the words 'research paper', 'academic paper', 'scientific paper', or 'research essay'\n" +
+                    "   c) The user named a specific topic for the paper\n" +
+                    "   EXAMPLE triggers: 'write me a research paper on climate change', 'create an academic paper about AI'\n" +
+                    "   NEVER triggers: discussing a topic, asking questions, 'tell me about X', 'what is X', any conversation, partial sentences, ambient speech\n" +
+                    "   If you are even slightly unsure, DO NOT call this tool — answer conversationally instead.\n\n" +
 
                     "== CLICKING ==\n" +
                     "When user says 'click on X' or 'click X': immediately call control_browser with action='smart_click' and target_text='X'. Do not call get_browser_state first.\n\n" +
@@ -109,6 +118,20 @@ async function startLiveSession(mainWindow, automation) {
                                         }
                                     },
                                     required: ["command"]
+                                }
+                            },
+                            {
+                                name: "create_research_paper",
+                                description: "Creates a full APA-formatted academic research paper. ONLY call when the user explicitly says one of these exact action verbs — write, create, generate, make, build, compose — AND explicitly says the words 'research paper', 'academic paper', 'scientific paper', or 'research essay', AND provides a topic. DO NOT call this because the user mentioned or discussed a topic. DO NOT call this for questions, summaries, or conversation. If the user is just talking about a subject, answer conversationally. Only call when the intent to produce a written paper document is completely unambiguous.",
+                                parameters: {
+                                    type: "OBJECT",
+                                    properties: {
+                                        topic: {
+                                            type: "STRING",
+                                            description: "The research topic or subject for the paper. Be specific and descriptive."
+                                        }
+                                    },
+                                    required: ["topic"]
                                 }
                             }
                         ]
@@ -188,7 +211,13 @@ async function startLiveSession(mainWindow, automation) {
                                     } else if (action === 'smart_click') {
                                         automationRef.smartClickBrowser(target_text);
                                     } else if (action === 'close') {
-                                        automationRef.closeBrowser();
+                                        // Block accidental close for 2 minutes after a research paper was opened
+                                        const timeSinceResearch = Date.now() - (global.novaLastResearchDoneAt || 0);
+                                        if (timeSinceResearch < 120000) {
+                                            console.log('🛡️ Browser close blocked — research paper just opened.');
+                                        } else {
+                                            automationRef.closeBrowser();
+                                        }
                                     }
                                 }
 
@@ -237,6 +266,40 @@ async function startLiveSession(mainWindow, automation) {
                                         });
                                     }
                                 }
+
+                            } else if (call.name === 'create_research_paper') {
+                                const { topic } = call.args;
+
+                                // Block if already researching or within 10 minutes of last completion
+                                const cooldownElapsed = Date.now() - (global.novaLastResearchDoneAt || 0);
+                                if (global.novaIsResearching || cooldownElapsed < 600000) {
+                                    console.log(`📄 [Research Tool] Blocked — already in progress or recently completed.`);
+                                    activeSession.sendRealtimeInput({
+                                        functionResponses: [{
+                                            id: call.id,
+                                            response: {
+                                                status: "Skipped",
+                                                message: "The research paper was just completed or is still in progress. Tell the user the paper is ready on their desktop and ask what else they need. Do NOT call create_research_paper again."
+                                            }
+                                        }]
+                                    });
+                                    return;
+                                }
+
+                                console.log(`📄 [Research Tool] Starting paper on: "${topic}"`);
+                                if (automationRef && automationRef.generatePaper) {
+                                    automationRef.generatePaper(topic);
+                                }
+
+                                activeSession.sendRealtimeInput({
+                                    functionResponses: [{
+                                        id: call.id,
+                                        response: {
+                                            status: "Started",
+                                            message: `Research paper on "${topic}" has been started. Tell the user you have started working on their research paper on "${topic}", that you are gathering information from multiple academic sources including IEEE, arXiv, and PubMed, and it will be saved to their desktop in a few minutes. Then stop talking and wait quietly.`
+                                        }
+                                    }]
+                                });
                             }
                         }
                     }

@@ -236,6 +236,9 @@ const Automation = {
     },
     speak: (text) => {
         if (mainWindow) mainWindow.webContents.send('speak', text);
+    },
+    generatePaper: (topic) => {
+        generateResearchPaper(topic, mainWindow);
     }
 };
 
@@ -1015,6 +1018,431 @@ ipcMain.handle('generate-speech', async (event, text) => {
         console.error("TTS Handle Error:", e);
         return null;
     }
+});
+
+// ── Research Paper Generator ───────────────────────────────────────────────
+
+function buildPaperHTML(topic, paperText) {
+    // Convert Gemini's markdown output to HTML for a professional APA paper
+    const lines = paperText.split('\n');
+    let htmlBody = '';
+    let inReferencesSection = false;
+    let i = 0;
+    while (i < lines.length) {
+        const line = lines[i].trim();
+        if (!line) { i++; continue; }
+
+        // Detect References / Web Sources section to apply special rendering
+        const isRefHeader = /^#{1,3}\s*(references|web sources|sources used|bibliography)/i.test(line) ||
+                            /^\*\*(references|web sources|sources used|bibliography)\*\*/i.test(line);
+        if (isRefHeader) {
+            inReferencesSection = true;
+            const txt = line.replace(/^#{1,3}\s+/, '').replace(/\*\*/g, '');
+            htmlBody += `<h2 class="section-title">${txt}</h2>\n<div class="references-section">\n`;
+            i++;
+            continue;
+        }
+
+        // Heading 1 (# Title)
+        if (/^#{1}\s+/.test(line)) {
+            htmlBody += `<h1 class="paper-title">${line.replace(/^#{1,3}\s+/, '').replace(/\*\*/g, '')}</h1>\n`;
+        }
+        // Heading 2+ — close references section if open
+        else if (/^#{2,3}\s+/.test(line) || /^\*\*[^*]+\*\*$/.test(line)) {
+            if (inReferencesSection) {
+                htmlBody += `</div>\n`;
+                inReferencesSection = false;
+            }
+            const txt = line.replace(/^#{2,3}\s+/, '').replace(/\*\*/g, '');
+            htmlBody += `<h2 class="section-title">${txt}</h2>\n`;
+        }
+        // Reference entry (numbered or hanging indent)
+        else if (inReferencesSection) {
+            const refLine = line
+                .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+                .replace(/\*(.+?)\*/g, '<em>$1</em>')
+                .replace(/(https?:\/\/[^\s<>"]+)/g, '<a href="$1" target="_blank" class="ref-url">$1</a>');
+            htmlBody += `<p class="reference">${refLine}</p>\n`;
+        }
+        // Bullet list
+        else if (/^[-•*]\s/.test(line)) {
+            let listItems = '';
+            while (i < lines.length && /^[-•*]\s/.test(lines[i].trim())) {
+                listItems += `<li>${lines[i].trim().replace(/^[-•*]\s+/, '').replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\*(.+?)\*/g, '<em>$1</em>')}</li>\n`;
+                i++;
+            }
+            htmlBody += `<ul>${listItems}</ul>\n`;
+            continue;
+        }
+        // Numbered list
+        else if (/^\d+\.\s/.test(line)) {
+            // In a references section, numbered items are individual references
+            if (inReferencesSection) {
+                const refLine = line
+                    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+                    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+                    .replace(/(https?:\/\/[^\s<>"]+)/g, '<a href="$1" target="_blank" class="ref-url">$1</a>');
+                htmlBody += `<p class="reference">${refLine}</p>\n`;
+            } else {
+                let listItems = '';
+                while (i < lines.length && /^\d+\.\s/.test(lines[i].trim())) {
+                    listItems += `<li>${lines[i].trim().replace(/^\d+\.\s+/, '').replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\*(.+?)\*/g, '<em>$1</em>')}</li>\n`;
+                    i++;
+                }
+                htmlBody += `<ol>${listItems}</ol>\n`;
+                continue;
+            }
+        }
+        // Regular paragraph — also convert bare URLs to clickable links
+        else {
+            const formatted = line
+                .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+                .replace(/\*(.+?)\*/g, '<em>$1</em>')
+                .replace(/(https?:\/\/[^\s<>"]+)/g, '<a href="$1" target="_blank" style="color:#1a0dab;word-break:break-all;">$1</a>');
+            htmlBody += `<p>${formatted}</p>\n`;
+        }
+        i++;
+    }
+    // Close references section if it was the last section
+    if (inReferencesSection) {
+        htmlBody += `</div>\n`;
+    }
+
+    const currentDate = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+    const runningHead = topic.toUpperCase().substring(0, 55);
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Research Paper: ${topic}</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Times New Roman', Times, serif;
+    font-size: 12pt;
+    line-height: 2;
+    color: #000;
+    background: #fff;
+    max-width: 8.5in;
+    margin: 0 auto;
+    padding: 1in;
+  }
+  .running-head {
+    font-size: 10pt;
+    text-align: left;
+    margin-bottom: 1.5em;
+    letter-spacing: 0.05em;
+  }
+  h1.paper-title {
+    font-size: 14pt;
+    font-weight: bold;
+    text-align: center;
+    margin-top: 0.5em;
+    margin-bottom: 0.25em;
+  }
+  h2.section-title {
+    font-size: 12pt;
+    font-weight: bold;
+    text-align: center;
+    margin-top: 1.5em;
+    margin-bottom: 0;
+  }
+  h3.subsection-title {
+    font-size: 12pt;
+    font-weight: bold;
+    font-style: italic;
+    text-align: left;
+    margin-top: 1em;
+    margin-bottom: 0;
+  }
+  p {
+    margin-bottom: 0;
+    text-indent: 0.5in;
+  }
+  p + h2.section-title, p + h3.subsection-title { margin-top: 1.5em; }
+  ul, ol {
+    margin-left: 1in;
+    margin-bottom: 1em;
+  }
+  li { margin-bottom: 0.2em; }
+  .footer-note {
+    font-size: 9pt;
+    color: #555;
+    text-align: center;
+    margin-top: 2.5em;
+    padding-top: 0.75em;
+    border-top: 1px solid #bbb;
+  }
+  .references-section {
+    margin-top: 0.5em;
+  }
+  p.reference {
+    text-indent: -0.5in;
+    padding-left: 0.5in;
+    margin-bottom: 0.75em;
+    line-height: 2;
+    word-break: break-word;
+  }
+  a.ref-url {
+    color: #1a0dab;
+    word-break: break-all;
+    font-size: 10pt;
+  }
+  @media print {
+    body { padding: 1in; }
+    .footer-note { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="running-head">Running head: ${runningHead}</div>
+${htmlBody}
+<div class="footer-note">
+  Generated by Nova AI Research Assistant &mdash; ${currentDate}<br>
+  Compiled using Gemini AI with live Google Search grounding. Citations are in APA 7th edition format.
+</div>
+</body>
+</html>`;
+}
+
+async function generateResearchPaper(topic, mainWindow) {
+    // Global lock: prevent duplicate research runs triggered by Gemini Live re-calls
+    if (global.novaIsResearching) {
+        console.log(`📄 Research already in progress — ignoring duplicate request for "${topic}"`);
+        return;
+    }
+    global.novaIsResearching = true;
+    global.novaLastResearchDoneAt = 0; // will be set when done
+
+    const { GoogleGenAI } = require('@google/genai');
+    const os = require('os');
+
+    // Notify renderer immediately so it can show the overlay and block all other commands
+    if (mainWindow) mainWindow.webContents.send('research-paper-started', { topic });
+
+    const sendProgress = (step, detail) => {
+        console.log(`📄 [Research] ${step}: ${detail}`);
+        if (mainWindow) mainWindow.webContents.send('research-paper-progress', { step, detail });
+    };
+
+    try {
+        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+        // Phase 1: Four focused web searches — mix of general academic and specific database queries
+        const searchQueries = [
+            `Academic research overview of "${topic}": historical background, foundational theories, key scholars, and landmark studies. Focus on peer-reviewed sources from IEEE, ACM Digital Library, JSTOR, Google Scholar, and academic journals. Include specific authors, years, and study titles.`,
+            `Recent peer-reviewed studies and findings on "${topic}" from PubMed, arXiv, ScienceDirect, Springer, and ResearchGate. Include specific paper titles, authors, publication years, methodologies, statistics, and DOI or URL links where possible.`,
+            `Scholarly debates, limitations, and future research directions for "${topic}". Find academic papers from JSTOR, IEEE Xplore, ACM, and arXiv that discuss controversies, open questions, and expert disagreements. Include specific citations.`,
+            `Policy reports, systematic reviews, and meta-analyses on "${topic}" from reputable sources such as WHO, World Bank, NBER, Brookings Institution, McKinsey Global Institute, or government research agencies. Include URLs and publication dates.`
+        ];
+
+        const gatheredContent = [];
+        const citationMap = new Map();
+
+        for (let idx = 0; idx < searchQueries.length; idx++) {
+            sendProgress('searching', `Academic search ${idx + 1} of 4: querying "${topic}"...`);
+            try {
+                const res = await ai.models.generateContent({
+                    model: 'gemini-2.5-flash',
+                    contents: searchQueries[idx],
+                    config: {
+                        tools: [{ googleSearch: {} }],
+                        temperature: 0.2,
+                    }
+                });
+
+                gatheredContent.push(res.text || '');
+
+                // Harvest grounding citations
+                const cands = res.candidates;
+                if (cands && cands[0] && cands[0].groundingMetadata) {
+                    const chunks = cands[0].groundingMetadata.groundingChunks || [];
+                    for (const chunk of chunks) {
+                        if (chunk.web && chunk.web.uri && !citationMap.has(chunk.web.uri)) {
+                            citationMap.set(chunk.web.uri, {
+                                title: chunk.web.title || 'Untitled Source',
+                                url: chunk.web.uri
+                            });
+                        }
+                    }
+                }
+            } catch (searchErr) {
+                console.warn(`Search ${idx + 1} warning:`, searchErr.message);
+                gatheredContent.push('');
+            }
+        }
+
+        const citations = Array.from(citationMap.values());
+
+        // Phase 2: Write the full research paper
+        sendProgress('writing', 'Writing the full research paper with APA citations...');
+
+        const currentYear = new Date().getFullYear();
+        const citationList = citations
+            .map((c, i) => `[Source ${i + 1}] Title: "${c.title}" | URL: ${c.url}`)
+            .join('\n');
+
+        const paperPrompt = `You are an expert academic researcher and writer. Write a COMPLETE, COMPREHENSIVE, PUBLICATION-QUALITY academic research paper on: "${topic}"
+
+Use the research information below as your primary source material.
+
+=== RESEARCH DATA ===
+
+[Overview & Background]
+${gatheredContent[0] || 'No data gathered.'}
+
+[Current Research & Findings]
+${gatheredContent[1] || 'No data gathered.'}
+
+[Debates, Applications & Future Directions]
+${gatheredContent[2] || 'No data gathered.'}
+
+=== SOURCES (use these for APA References) ===
+${citationList || 'No specific sources captured — cite using knowledge.'}
+
+=== PAPER STRUCTURE (write ALL sections fully) ===
+
+## [Full Academic Title — specific and descriptive]
+
+**Author:** Nova AI Research Assistant (${currentYear})
+
+**Abstract**
+[Write 200-280 words: background, research objectives, brief methodology, key findings, and conclusions.]
+
+**Keywords:** [6-8 comma-separated academic keywords]
+
+## 1. Introduction
+[600-800 words. Cover: background context, problem statement, why this topic matters, gap in knowledge being addressed, research objectives, and outline of paper structure. Use in-text APA citations (Author, Year) where appropriate.]
+
+## 2. Literature Review
+[900-1200 words. Critically review existing scholarship. Discuss major theories, landmark studies, key scholars, competing views, and how prior research evolved. Use in-text citations throughout.]
+
+## 3. Methodology / Theoretical Framework
+[500-700 words. Explain the research approach, theoretical lens(es) applied, analytical framework, data sources used, and any limitations of the methodology.]
+
+## 4. Results and Discussion
+[1000-1400 words. Present key findings from the research. Analyze, interpret, and discuss implications. Compare with prior studies. Address contradictions and nuances. Support all claims with evidence and citations.]
+
+## 5. Conclusion
+[500-700 words. Summarize the major findings, restate the significance, discuss contributions to the field, acknowledge limitations, and propose future research directions.]
+
+## References
+[MANDATORY — this section MUST appear and MUST be complete.
+List EVERY source cited in the paper in APA 7th edition format, sorted alphabetically.
+Include the full URL for every web source. Minimum 10 references required.
+Web articles: Author Surname, I. (Year, Month Day). Title of article in sentence case. *Website Name*. https://full-url-here
+No-author web: Title of article in sentence case. (Year, Month Day). *Website Name*. https://full-url-here
+Journal: Author, A. A., & Author, B. B. (Year). Title of article. *Journal Name*, *volume*(issue), pages. https://doi.org/xxxxx
+Book: Author, A. A. (Year). *Title of book*. Publisher.
+Report: Organization Name. (Year). *Title of report*. https://full-url-here
+Use REAL, COMPLETE URLs from the sources provided above. Do not invent or shorten URLs.]
+
+=== MANDATORY CITATION RULES ===
+- EVERY factual claim must end with an in-text APA citation: (Author, Year) or (Source Name, Year)
+- EVERY paragraph in sections 1-5 must contain at minimum 2 in-text citations
+- The References section is NON-OPTIONAL — it must appear at the end with every source listed
+- Every source listed in References must have been cited at least once in the body text
+- Include the FULL URL for every web reference — do not abbreviate or omit URLs
+
+=== FORMATTING RULES ===
+- Minimum 4,500 words in the body sections
+- Formal academic prose — no bullet points in body paragraphs
+- Every paragraph must be substantive (6-10 sentences minimum)
+- In-text citations: (Author, Year) or (Abbreviated Title, Year) for web sources
+- Do NOT include any preamble, commentary, or notes outside the paper itself
+- Begin directly with the title
+
+WRITE THE COMPLETE PAPER NOW:`;
+
+        // Try gemini-2.5-pro first (better quality), retry up to 2×, then fall back to flash
+        let paperText = '';
+        const writeModels = ['gemini-2.5-pro', 'gemini-2.5-pro', 'gemini-2.5-flash'];
+        let writeError = null;
+        for (let attempt = 0; attempt < writeModels.length; attempt++) {
+            const writeModel = writeModels[attempt];
+            try {
+                if (attempt > 0) {
+                    const delay = attempt === 1 ? 8000 : 3000;
+                    sendProgress('writing', attempt < 2
+                        ? `Model busy — retrying in ${delay / 1000}s...`
+                        : 'Switching to faster model...');
+                    await new Promise(r => setTimeout(r, delay));
+                }
+                console.log(`📄 Writing paper with model: ${writeModel} (attempt ${attempt + 1})`);
+                const paperRes = await ai.models.generateContent({
+                    model: writeModel,
+                    contents: paperPrompt,
+                    config: {
+                        temperature: 0.35,
+                        maxOutputTokens: 8192,
+                    }
+                });
+                paperText = paperRes.text;
+                writeError = null;
+                break; // success
+            } catch (err) {
+                writeError = err;
+                console.warn(`⚠️ Paper write attempt ${attempt + 1} failed (${writeModel}):`, err.message);
+            }
+        }
+        if (!paperText) throw writeError || new Error('All paper write attempts failed.');
+
+        // Guarantee a real Web Sources section using actual grounding URLs
+        // (Gemini may not include all URLs in its generated References section)
+        if (citations.length > 0) {
+            const webSourcesHeader = '\n\n## Web Sources Used\n';
+            // Only append if we have grounding URLs
+            const sourceLines = citations.map((c, i) => {
+                const num = i + 1;
+                return `${num}. ${c.title}. ${c.url}`;
+            }).join('\n');
+            // Append after the main paper text
+            paperText = paperText + webSourcesHeader + sourceLines;
+        }
+
+        // Phase 3: Save to Desktop and open
+        sendProgress('saving', 'Formatting and saving to your Desktop...');
+
+        const desktopPath = path.join(os.homedir(), 'Desktop');
+        const safeTopic = topic
+            .replace(/[^a-zA-Z0-9\s-]/g, '')
+            .replace(/\s+/g, '_')
+            .substring(0, 45);
+        const fileName = `Research_Paper_${safeTopic}_${Date.now()}.html`;
+        const filePath = path.join(desktopPath, fileName);
+
+        const htmlContent = buildPaperHTML(topic, paperText);
+        fs.writeFileSync(filePath, htmlContent, 'utf8');
+
+        sendProgress('opening', 'Opening your research paper in Nova Browser...');
+        // Open in Nova's internal browser instead of the system default
+        createBrowserWindow();
+        setTimeout(() => {
+            if (browserWin) browserWin.webContents.send('navigate', `file://${filePath}`);
+        }, 600);
+
+        global.novaIsResearching = false;
+        global.novaLastResearchDoneAt = Date.now();
+        if (mainWindow) {
+            mainWindow.webContents.send('research-paper-done', { success: true, filePath, fileName });
+        }
+
+    } catch (err) {
+        console.error('❌ Research paper generation failed:', err);
+        global.novaIsResearching = false;
+        global.novaLastResearchDoneAt = Date.now();
+        if (mainWindow) {
+            mainWindow.webContents.send('research-paper-done', { success: false, error: err.message });
+        }
+    }
+}
+
+ipcMain.handle('generate-research-paper', async (event, topic) => {
+    console.log(`📄 Research paper requested for topic: "${topic}"`);
+    generateResearchPaper(topic, mainWindow);
+    return { started: true };
 });
 
 app.whenReady().then(() => {
