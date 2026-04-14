@@ -1,12 +1,7 @@
 /**
- * renderer.js — Three.js scene for the sci-fi robot desktop widget
- * Uses ES module imports (Electron renderer supports native ESM).
+ * renderer.js — Nova AI desktop widget
+ * Orb-based UI with voice + Gemini Live integration.
  */
-
-import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 // Electron Native Modules
 const { ipcRenderer } = window.require('electron');
@@ -56,91 +51,32 @@ window.addEventListener('mouseup', () => {
     isDragging = false;
 });
 
-// Raycaster for precise 3D model clicking
-const raycaster = new THREE.Raycaster();
-const mouse = new THREE.Vector2();
+// Double-click on orb opens chat
+window.addEventListener('dblclick', () => {
+    ipcRenderer.send('open-chat');
+});
 
-window.addEventListener('dblclick', (event) => {
-    mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
-    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+// ── Widget State Management ────────────────────────────────────────────────
+const novaWidget = document.getElementById('widget');
 
-    raycaster.setFromCamera(mouse, camera);
+function setOrbState(state) {
+    if (!novaWidget) return;
+    novaWidget.classList.remove('listening', 'speaking', 'thinking');
+    if (state) novaWidget.classList.add(state);
+}
 
-    if (typeof robotGroup !== 'undefined' && robotGroup) {
-        const intersects = raycaster.intersectObject(robotGroup, true);
-        // Ensure we only trigger if we hit a VISIBLE part of the robot (ignoring the hidden wall/ground)
-        const validIntersects = intersects.filter(hit => hit.object && hit.object.visible);
-
-        if (validIntersects.length > 0) {
-            ipcRenderer.send('open-chat');
-        }
+// Poll novaState and reflect it on the badge visually
+setInterval(() => {
+    if (window.novaState.isResearching || window.novaState.isProcessingCommand) {
+        setOrbState('thinking');
+    } else if (window.novaState.isSpeaking) {
+        setOrbState('speaking');
+    } else if (window.novaState.isAwake) {
+        setOrbState('listening');
+    } else {
+        setOrbState(null);
     }
-});
-
-// ── Canvas & Renderer ──────────────────────────────────────────────────────
-const canvas = document.getElementById('canvas');
-
-const renderer = new THREE.WebGLRenderer({
-    canvas,
-    alpha: true,
-    antialias: true,
-    powerPreference: 'high-performance',
-});
-renderer.setClearColor(0x000000, 0);
-renderer.setPixelRatio(window.devicePixelRatio);
-renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.0;
-
-const pmremGenerator = new THREE.PMREMGenerator(renderer);
-pmremGenerator.compileEquirectangularShader();
-
-// ── Scene ──────────────────────────────────────────────────────────────────
-const scene = new THREE.Scene();
-scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
-
-// ── Camera ─────────────────────────────────────────────────────────────────
-const camera = new THREE.PerspectiveCamera(
-    45,
-    window.innerWidth / window.innerHeight,
-    0.1,
-    100
-);
-camera.position.set(0, 0.5, 3.5);
-camera.lookAt(0, 0, 0);
-
-// ── Lighting ───────────────────────────────────────────────────────────────
-// Soft ambient fill
-const ambient = new THREE.AmbientLight(0xffffff, 2.0);
-scene.add(ambient);
-
-// Main key light (warm white)
-const keyLight = new THREE.DirectionalLight(0xfff0e0, 2.8);
-keyLight.position.set(3, 6, 4);
-keyLight.castShadow = true;
-keyLight.shadow.mapSize.set(1024, 1024);
-keyLight.shadow.camera.near = 0.5;
-keyLight.shadow.camera.far = 30;
-scene.add(keyLight);
-
-// Fill light (cool blue)
-const fillLight = new THREE.DirectionalLight(0x8ab4f8, 1.2);
-fillLight.position.set(-4, 3, -2);
-scene.add(fillLight);
-
-// Rim / back light (orange glow for sci-fi feel)
-const rimLight = new THREE.DirectionalLight(0xff6030, 0.8);
-rimLight.position.set(0, 2, -5);
-scene.add(rimLight);
-
-// ── Debug Cube ─────────────────────────────────────────────────────────────
-const geometry = new THREE.BoxGeometry(0.5, 0.5, 0.5);
-const material = new THREE.MeshStandardMaterial({ color: 0xff0000 });
-const cube = new THREE.Mesh(geometry, material);
-cube.position.set(1.5, 0.5, 0);
-scene.add(cube);
+}, 100);
 
 window.onerror = function (msg, url, line, col, error) {
     console.error("Window Error: ", msg, url, line, col, error);
@@ -150,186 +86,6 @@ window.addEventListener('unhandledrejection', function (event) {
     console.error('Unhandled Rejection: ', event.reason);
 });
 
-// ── GLTF Loader ────────────────────────────────────────────────────────────
-// In Electron file:// context, relative paths from index.html resolve correctly.
-// We navigate up one level from robot-widget/ to reach sci_fi_worker_robot_gltf/
-const MODEL_URL = 'appassets://sci_fi_worker_robot_gltf/scene.gltf';
-
-// ── Loaders ────────────────────────────────────────────────────────────────
-let robotGroup;
-
-// Procedural Animation Targets
-let headNode;
-let bodyNode;
-let armRNode;
-let armLNode;
-
-// Initial Transforms
-let headInitRot;
-let bodyInitPos;
-let bodyInitRot;
-let armRInitRot;
-let armLInitRot;
-
-const dracoLoader = new DRACOLoader();
-dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
-
-const loader = new GLTFLoader();
-loader.setDRACOLoader(dracoLoader);
-
-loader.load(
-    MODEL_URL,
-    (gltf) => {
-        const model = gltf.scene;
-
-        // Reset any wild transforms
-        model.position.set(0, 0, 0);
-        model.scale.set(1, 1, 1);
-
-        // Hide unwanted diorama meshes and update materials
-        model.traverse((child) => {
-            if (child.isMesh) {
-                const nodeName = child.name.toLowerCase();
-                const matName = child.material ? child.material.name.toLowerCase() : '';
-
-                // Remove wall / ground meshes by node name OR material name
-                if (nodeName.includes("wall") || nodeName.includes("ground") || nodeName.includes("background") ||
-                    matName.includes("wall") || matName.includes("ground") || matName.includes("background")) {
-                    child.visible = false;
-                } else {
-                    child.castShadow = false;
-                    child.receiveShadow = false;
-                }
-
-                // Make sure textures render correctly
-                if (child.material) {
-                    child.material.needsUpdate = true;
-                    child.material.envMapIntensity = 1.0;
-                    if (child.material.metalness !== undefined) {
-                        child.material.metalness = 0.5;
-                    }
-                }
-            }
-        });
-
-        // Compute bounding box ONLY for visible meshes
-        const box = new THREE.Box3();
-        model.traverse((child) => {
-            if (child.isMesh && child.visible) {
-                box.expandByObject(child);
-            }
-        });
-
-        let size = new THREE.Vector3();
-        let center = new THREE.Vector3();
-
-        // Fallback if no meshes are visible
-        if (box.isEmpty()) {
-            size.set(2, 2, 2);
-            center.set(0, 0, 0);
-        } else {
-            box.getSize(size);
-            box.getCenter(center);
-        }
-
-        // Auto-frame camera mathematically
-        const maxDim = Math.max(size.x, size.y, size.z);
-        const fov = camera.fov * (Math.PI / 180);
-        // Increase padding from 1.5 to 2.2 to make the robot appear smaller within the window
-        let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2)) * 2.2;
-
-        console.log("✅ Bounding Box Computed:", { size, center, maxDim, cameraZ });
-
-        // Shift model so its true center is (0,0,0) BEFORE putting it in a group
-        model.position.sub(center);
-
-        // Place camera relative to the newly centered origin
-        camera.position.set(0, (size.y * 0.2), cameraZ);
-        camera.lookAt(0, 0, 0);
-
-        // Adjust lights to encompass the visible model at origin
-        keyLight.position.set(maxDim, maxDim, maxDim);
-        keyLight.castShadow = false;
-        rimLight.position.set(-maxDim, maxDim, -maxDim);
-
-        robotGroup = new THREE.Group();
-        robotGroup.add(model);
-
-        // Rotate the robot a bit to the left (facing left side of screen)
-        robotGroup.rotation.y = -0.5; // ~ -30 degrees
-
-        scene.add(robotGroup);
-
-        // Save references to specific robot parts for procedural idle animation
-        headNode = model.getObjectByName('Head_13') || model.getObjectByName('Head Rotate_14');
-        bodyNode = model.getObjectByName('Robot_Main_Controller_40') || model.getObjectByName('Body_25') || model;
-        armRNode = model.getObjectByName('Arm_1_Right_26') || model.getObjectByName('Arm 1 Right_26');
-        armLNode = model.getObjectByName('Arm_1_Left_35') || model.getObjectByName('Arm 1 Left_35');
-
-        // Store their resting poses so we don't snap them into the sky or fold them backward!
-        if (headNode) headInitRot = headNode.rotation.clone();
-        if (bodyNode) {
-            bodyInitPos = bodyNode.position.clone();
-            bodyInitRot = bodyNode.rotation.clone();
-        }
-        if (armRNode) armRInitRot = armRNode.rotation.clone();
-        if (armLNode) armLInitRot = armLNode.rotation.clone();
-
-        console.log('✅ Robot model loaded natively with procedural targets');
-    },
-    (progress) => {
-        if (progress.total > 0) {
-            console.log(`Loading… ${Math.round((progress.loaded / progress.total) * 100)}%`);
-        }
-    },
-    (err) => console.error('❌ Error loading model:', err)
-);
-
-// ── Render size ────────────────────────────────────────────────────────────
-function updateSize() {
-    const w = window.innerWidth;
-    const h = window.innerHeight;
-    renderer.setSize(w, h);
-    camera.aspect = w / h;
-    camera.updateProjectionMatrix();
-}
-updateSize();
-window.addEventListener('resize', updateSize);
-
-// ── Animation loop ─────────────────────────────────────────────────────────
-const clock = new THREE.Clock();
-
-function animate() {
-    requestAnimationFrame(animate);
-    const time = clock.getElapsedTime();
-
-    // Procedural idle animations using sine waves!
-    if (headNode && headInitRot) {
-        // Gentle head turning, ADDED to initial rotation
-        headNode.rotation.y = headInitRot.y + Math.sin(time * 0.7) * 0.15;
-        headNode.rotation.z = headInitRot.z + Math.sin(time * 0.4) * 0.05;
-    }
-
-    if (bodyNode && bodyInitPos) {
-        // Gentle body sway/breathing
-        bodyNode.rotation.y = bodyInitRot.y + Math.sin(time * 0.5) * 0.05;
-        bodyNode.position.y = bodyInitPos.y + Math.sin(time * 1.5) * 0.02;
-    }
-
-    if (armRNode && armRInitRot) {
-        // Subtle arm floating
-        armRNode.rotation.z = armRInitRot.z + Math.sin(time * 0.8) * 0.1;
-    }
-
-    if (armLNode && armLInitRot) {
-        // Subtle arm floating (offset from right arm)
-        armLNode.rotation.z = armLInitRot.z + Math.sin(time * 0.8 + 1) * 0.1;
-    }
-
-    renderer.render(scene, camera);
-}
-
-animate();
 
 // ── TTS & Offline Voice Recognition (VOSK) ─────────────────────────────────
 let currentAudio = null;
@@ -485,63 +241,19 @@ async function speak(text) {
     }
 }
 
+// listeningSymbol kept as a detached element — logic uses it internally but it is never shown
 let listeningSymbol = document.createElement('div');
 listeningSymbol.innerHTML = '🎤 Listening...';
-listeningSymbol.style.position = 'absolute';
-listeningSymbol.style.top = '20px';
-listeningSymbol.style.right = '20px';
-listeningSymbol.style.color = '#0ff';
-listeningSymbol.style.fontFamily = 'monospace';
-listeningSymbol.style.fontSize = '16px';
 listeningSymbol.style.display = 'none';
-listeningSymbol.style.textShadow = '0 0 5px #0ff';
-document.body.appendChild(listeningSymbol);
 
+// subtitleElement kept as a detached element — logic uses it internally but it is never shown
 let subtitleElement = document.createElement('div');
 subtitleElement.id = 'subtitle';
-subtitleElement.style.position = 'absolute';
-subtitleElement.style.bottom = '80px';
-subtitleElement.style.left = '50%';
-subtitleElement.style.transform = 'translateX(-50%)';
-subtitleElement.style.padding = '12px 24px';
-subtitleElement.style.background = 'rgba(0, 0, 0, 0.5)';
-subtitleElement.style.backdropFilter = 'blur(12px)';
-subtitleElement.style.webkitBackdropFilter = 'blur(12px)';
-subtitleElement.style.borderRadius = '24px';
-subtitleElement.style.border = '1px solid rgba(0, 255, 255, 0.3)';
-subtitleElement.style.boxShadow = '0 8px 32px 0 rgba(0, 0, 0, 0.6), inset 0 0 10px rgba(0, 255, 255, 0.1)';
-subtitleElement.style.color = '#fff';
-subtitleElement.style.fontFamily = '"Segoe UI", Roboto, Helvetica, Arial, sans-serif';
-subtitleElement.style.fontSize = '20px';
-subtitleElement.style.fontWeight = '500';
-subtitleElement.style.textShadow = '0 0 8px rgba(0, 255, 255, 0.5)';
-subtitleElement.style.textAlign = 'center';
-subtitleElement.style.pointerEvents = 'none';
-subtitleElement.style.width = 'fit-content';
-subtitleElement.style.maxWidth = '85%';
-subtitleElement.style.transition = 'all 0.3s ease';
 subtitleElement.style.display = 'none';
-subtitleElement.style.zIndex = '9999';
-document.body.appendChild(subtitleElement);
 
-let uiLogElement = null;
 function uiLog(msg) {
-    if (!uiLogElement) {
-        uiLogElement = document.createElement('div');
-        uiLogElement.id = 'ui-log';
-        uiLogElement.style.position = 'absolute';
-        uiLogElement.style.bottom = '10px';
-        uiLogElement.style.left = '10px';
-        uiLogElement.style.color = '#0f0';
-        uiLogElement.style.fontFamily = 'monospace';
-        uiLogElement.style.fontSize = '12px';
-        uiLogElement.style.whiteSpace = 'pre';
-        uiLogElement.style.pointerEvents = 'none';
-        document.body.appendChild(uiLogElement);
-    }
     const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    uiLogElement.innerText = `[${timestamp}] ${msg}`;
-    console.log(`[UI LOG] ${msg}`);
+    console.log(`[UI LOG ${timestamp}] ${msg}`);
 }
 
 ipcRenderer.on('automation-log', (event, msg) => {
@@ -1264,6 +976,31 @@ async function initOfflineVoice() {
 setTimeout(() => {
     initOfflineVoice();
 }, 2000);
+
+// ── Startup introduction ───────────────────────────────────────────────────
+// Plays a one-way announcement via Piper TTS WITHOUT touching novaState so
+// Vosk keeps running and "Hey Nova" is detectable during/after the intro.
+setTimeout(async () => {
+    try {
+        console.log('[Nova Startup] Generating intro audio...');
+        const audioPath = await ipcRenderer.invoke('generate-speech',
+            "Nova online. I am your personal AI assistant. " +
+            "Say Hey Nova at any time to start a conversation with me in any language.");
+        if (!audioPath) { console.warn('[Nova Startup] No audio path'); return; }
+        const audio = new Audio();
+        audio.addEventListener('loadeddata', () => {
+            audio.play()
+                .then(() => console.log('[Nova Startup] Intro playing.'))
+                .catch(err => console.error('[Nova Startup] play() failed:', err));
+        });
+        audio.addEventListener('ended',  () => console.log('[Nova Startup] Intro finished.'));
+        audio.addEventListener('error',  (e) => console.error('[Nova Startup] Audio error:', e.target?.error?.code));
+        audio.src = `appassets:///${audioPath}`;
+        audio.load();
+    } catch (err) {
+        console.error('[Nova Startup] TTS error:', err);
+    }
+}, 1200);
 
 // Helper to detect music intent
 function isMusicIntent(query) {

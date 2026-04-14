@@ -3,13 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Robot Widget</title>
+  <title>Nova</title>
   <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
     html, body {
       width: 100%;
       height: 100%;
@@ -17,36 +14,227 @@
       background: transparent;
       user-select: none;
       -webkit-user-select: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
-    #canvas {
-      display: block;
-      width: 100%;
-      height: 100%;
+
+    /* ── Root ── */
+    #widget {
+      position: relative;
+      width: 120px;
+      height: 120px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
-    #debug {
+
+    /* ── Thin spinning arc (conic-gradient + mask = ring-slice) ── */
+    #arc {
       position: absolute;
-      top: 10px;
-      left: 10px;
-      color: white;
-      font-family: sans-serif;
-      font-size: 14px;
-      z-index: 10;
-      text-shadow: 1px 1px 2px black;
+      width: 90px;
+      height: 90px;
+      border-radius: 50%;
+      background: conic-gradient(
+        from 0deg,
+        transparent   0deg,
+        transparent   62deg,
+        rgba(212,168,42,0.50)  78deg,
+        rgba(252,218,62,1.00) 108deg,
+        rgba(212,168,42,0.50) 124deg,
+        transparent  140deg,
+        transparent  360deg
+      );
+      /* 1.5 px ring slice */
+      -webkit-mask: radial-gradient(transparent 42.5px, #000 43px, #000 44.5px, transparent 45px);
+      mask:         radial-gradient(transparent 42.5px, #000 43px, #000 44.5px, transparent 45px);
+      animation: spin 9s linear infinite;
+      filter: drop-shadow(0 0 2.5px rgba(252,218,62,0.90));
+      pointer-events: none;
     }
-  </style>
-  <script type="importmap">
-    {
-      "imports": {
-        "three": "./node_modules/three/build/three.module.js",
-        "three/addons/": "./node_modules/three/examples/jsm/"
+
+    /* Ghost counter-arc (white, very faint) */
+    #arc2 {
+      position: absolute;
+      width: 90px;
+      height: 90px;
+      border-radius: 50%;
+      background: conic-gradient(
+        from 195deg,
+        transparent  0deg,
+        transparent  72deg,
+        rgba(255,255,255,0.14)  84deg,
+        rgba(255,255,255,0.26)  96deg,
+        rgba(255,255,255,0.14) 108deg,
+        transparent  120deg,
+        transparent  360deg
+      );
+      -webkit-mask: radial-gradient(transparent 42.5px, #000 43px, #000 44.5px, transparent 45px);
+      mask:         radial-gradient(transparent 42.5px, #000 43px, #000 44.5px, transparent 45px);
+      animation: spin-r 14s linear infinite;
+      pointer-events: none;
+    }
+
+    /* ── Crisp static border ring ── */
+    #ring {
+      position: absolute;
+      width: 82px;
+      height: 82px;
+      border-radius: 50%;
+      /* crisp 1.5 px solid line — not diffuse */
+      border: 1.5px solid rgba(235,195,55,0.60);
+      box-shadow:
+        0 0  5px rgba(235,195,55,0.55),
+        0 0 12px rgba(212,168,42,0.28),
+        inset 0 0  5px rgba(235,195,55,0.06);
+      pointer-events: none;
+    }
+
+    /* ── FLAT dark interior — no 3-D gradient ── */
+    #face {
+      position: absolute;
+      width: 72px;
+      height: 72px;
+      border-radius: 50%;
+      /* Flat dark — avoids the "bowling ball" effect */
+      background: #09080400;
+      background-color: #09070300;
+      /* Subtle very-low-contrast inner shadow for a shallow recess feel */
+      background: #0a0803;
+      box-shadow: inset 0 0 12px rgba(0,0,0,0.88);
+      cursor: pointer;
+      overflow: hidden;
+    }
+
+    /* ── Centre: 3-line waveform icon ── */
+    #icon {
+      position: absolute;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 5px;
+      pointer-events: none;
+    }
+    .ibar {
+      border-radius: 1px;
+      background: rgba(248,218,62,0.72);
+      height: 1.5px;
+      animation: ibar-breathe 3.4s ease-in-out infinite;
+    }
+    .ibar.b1 { width: 24px; animation-delay: 0.00s; }
+    .ibar.b2 { width: 34px; animation-delay: 0.18s; }
+    .ibar.b3 { width: 24px; animation-delay: 0.09s; }
+
+    /* ── 3×3 dot grid (floating right) ── */
+    #dot-grid {
+      position: absolute;
+      right: 2px;
+      top: 12px;
+      display: grid;
+      grid-template-columns: repeat(3, 4px);
+      gap: 3px;
+      pointer-events: none;
+    }
+    #dot-grid span {
+      display: block;
+      width: 2.5px;
+      height: 2.5px;
+      border-radius: 50%;
+      background: rgba(212,168,42,0.35);
+    }
+
+    /* ════════  BASE KEYFRAMES  ════════ */
+
+    @keyframes spin   { to { transform: rotate( 360deg); } }
+    @keyframes spin-r { to { transform: rotate(-360deg); } }
+
+    @keyframes ibar-breathe {
+      0%, 100% { opacity: 0.45; transform: scaleX(1);    }
+      50%       { opacity: 0.80; transform: scaleX(1.12); }
+    }
+    @keyframes ibar-wave {
+      0%   { opacity: 0.85; transform: scaleX(0.55); }
+      50%  { opacity: 1.00; transform: scaleX(1.45); }
+      100% { opacity: 0.85; transform: scaleX(0.55); }
+    }
+    @keyframes ring-pulse-speak {
+      0%, 100% {
+        border-color: rgba(252,218,62,0.75);
+        box-shadow: 0 0  7px rgba(252,218,62,0.65), 0 0 16px rgba(212,168,42,0.36);
+      }
+      50% {
+        border-color: rgba(255,232,80,1.00);
+        box-shadow: 0 0 12px rgba(255,232,80,0.95), 0 0 28px rgba(232,185,48,0.60);
       }
     }
-  </script>
+    @keyframes ring-pulse-listen {
+      0%, 100% {
+        border-color: rgba(235,230,200,0.55);
+        box-shadow: 0 0 7px rgba(245,240,210,0.45), 0 0 16px rgba(235,225,185,0.22);
+      }
+      50% {
+        border-color: rgba(255,255,230,0.80);
+        box-shadow: 0 0 11px rgba(255,255,220,0.75), 0 0 24px rgba(245,235,195,0.38);
+      }
+    }
+
+    /* ════════  STATE OVERRIDES  ════════ */
+
+    /* -- LISTENING -- */
+    #widget.listening #arc {
+      background: conic-gradient(
+        from 0deg,
+        transparent  0deg, transparent 62deg,
+        rgba(235,230,190,0.55) 78deg, rgba(255,255,215,1) 108deg,
+        rgba(235,230,190,0.55) 124deg, transparent 140deg, transparent 360deg
+      );
+      animation-duration: 5s;
+      filter: drop-shadow(0 0 2.5px rgba(255,255,200,0.80));
+    }
+    #widget.listening #ring  { animation: ring-pulse-listen 1.6s ease-in-out infinite; }
+    #widget.listening .ibar  { background: rgba(255,255,210,0.80); animation-duration: 1.8s; }
+
+    /* -- SPEAKING -- */
+    #widget.speaking #arc    { animation-duration: 1.3s; filter: drop-shadow(0 0 4px rgba(252,218,62,1.00)); }
+    #widget.speaking #arc2   { animation-duration: 0.85s; }
+    #widget.speaking #ring   { animation: ring-pulse-speak 0.50s ease-in-out infinite; }
+    #widget.speaking .ibar   {
+      background: rgba(252,218,62,0.96);
+      animation: ibar-wave 0.44s ease-in-out infinite;
+    }
+    #widget.speaking .ibar.b1 { animation-delay: 0.00s; }
+    #widget.speaking .ibar.b2 { animation-delay: 0.09s; }
+    #widget.speaking .ibar.b3 { animation-delay: 0.04s; }
+
+    /* -- THINKING -- */
+    #widget.thinking #arc    { animation-duration: 20s; opacity: 0.50; }
+    #widget.thinking #arc2   { opacity: 0.25; }
+    #widget.thinking #ring   {
+      border-color: rgba(212,168,42,0.30);
+      box-shadow: 0 0 5px rgba(212,168,42,0.20);
+    }
+    #widget.thinking .ibar   { animation-duration: 1.2s; opacity: 0.40; }
+  </style>
 </head>
 <body>
-  <canvas id="canvas"></canvas>
+  <div id="widget">
+    <div id="arc"></div>
+    <div id="arc2"></div>
+    <div id="ring"></div>
+    <div id="face"></div>
+    <div id="icon">
+      <div class="ibar b1"></div>
+      <div class="ibar b2"></div>
+      <div class="ibar b3"></div>
+    </div>
+    <div id="dot-grid">
+      <span></span><span></span><span></span>
+      <span></span><span></span><span></span>
+      <span></span><span></span><span></span>
+    </div>
+  </div>
+
   <script src="./node_modules/vosk-browser/dist/vosk.js"></script>
-  <!-- ES module entry point; Electron supports native ES modules in renderers -->
   <script type="module" src="renderer.js"></script>
 </body>
 </html>

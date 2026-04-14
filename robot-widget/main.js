@@ -14,8 +14,8 @@ protocol.registerSchemesAsPrivileged([
     { scheme: 'appassets', privileges: { standard: true, supportFetchAPI: true, secure: true, bypassCSP: true } }
 ]);
 
-const WINDOW_WIDTH = 250;
-const WINDOW_HEIGHT = 350;
+const WINDOW_WIDTH = 130;
+const WINDOW_HEIGHT = 130;
 
 let mainWindow = null;
 
@@ -1470,7 +1470,15 @@ app.whenReady().then(() => {
             else if (absolutePath.endsWith('.jpeg') || absolutePath.endsWith('.jpg')) contentType = 'image/jpeg';
             else if (absolutePath.endsWith('.png')) contentType = 'image/png';
 
-            return new Response(data, { headers: { 'Content-Type': contentType } });
+            // Content-Length and Accept-Ranges are required for Chromium's
+            // media pipeline to accept the response for HTML5 Audio playback.
+            return new Response(data, {
+                headers: {
+                    'Content-Type': contentType,
+                    'Content-Length': String(data.length),
+                    'Accept-Ranges': 'bytes',
+                }
+            });
         } catch (err) {
             console.error('AppAssets error reading:', absolutePath, err);
             return new Response('Not Found', { status: 404 });
