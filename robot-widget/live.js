@@ -9,10 +9,14 @@ let mainWindowRef = null;
 let automationRef = null;
 const lastExecCommandMap = new Map(); // cmdKey → last call timestamp
 const EXEC_COOLDOWN_MS = 15000; // Per-command cooldown: 15 seconds
+let _browserIsOpen = false;          // True only after Nova explicitly opened the browser this session
+let _lastBrowserActionAt = 0;        // Timestamp of last browser action (debounce spam)
 
 async function startLiveSession(mainWindow, automation) {
     mainWindowRef = mainWindow;
     automationRef = automation;
+    _browserIsOpen = false;      // Reset browser state for each new session
+    _lastBrowserActionAt = 0;
     if (activeSession) {
         console.log('Live Session already active.');
         return;
@@ -46,8 +50,11 @@ async function startLiveSession(mainWindow, automation) {
                     "   - 'search for X on google' / 'go to website X' / 'open X in the browser' → action='open', query='X'\n" +
                     "   - 'play X on youtube' / 'search youtube for X' → action='search_youtube', query='X'\n" +
                     "   - 'click on X' / 'click X' → action='smart_click', target_text='X'\n" +
-                    "   - 'close the browser' → action='close'\n" +
-                    "   - Never for general questions or conversation topics.\n\n" +
+                    "   - 'close the browser' / 'close browser' → action='close' (ONLY if the browser was opened earlier in this session)\n" +
+                    "   - 'switch to incognito' / 'enable incognito mode' / 'go incognito' / 'turn on incognito' → action='toggle_incognito'\n" +
+                    "   - 'exit incognito' / 'disable incognito' / 'go back to normal mode' → action='toggle_incognito'\n" +
+                    "   - NEVER call control_browser for general conversation, questions, topics, or anything that doesn't directly control the browser UI.\n" +
+                    "   - NEVER call action='close' unless the user explicitly said the word 'close' AND referred to the browser.\n\n" +
 
                     "3. get_browser_state — ONLY when user says 'what is on screen' or 'list the elements'. " +
                     "   Do NOT call this before clicking. For all clicks use control_browser action='smart_click' directly.\n\n" +
@@ -59,6 +66,12 @@ async function startLiveSession(mainWindow, automation) {
                     "   c) The user named a specific topic for the paper\n" +
                     "   EXAMPLE triggers: 'write me a research paper on climate change', 'create an academic paper about AI'\n" +
                     "   NEVER triggers: discussing a topic, asking questions, 'tell me about X', 'what is X', any conversation, partial sentences, ambient speech\n" +
+                    "   ABSOLUTE NEVER triggers: any sentence containing 'open', 'show', 'find', 'display', 'locate', or 'get' before 'research paper' — these are file-open requests, NOT creation requests.\n" +
+                    "   Examples of file-open requests (NEVER call create_research_paper for these):\n" +
+                    "     'open file research paper on climate change'\n" +
+                    "     'open the research paper'\n" +
+                    "     'show me the research paper about AI'\n" +
+                    "     'find research paper climate change'\n" +
                     "   If you are even slightly unsure, DO NOT call this tool — answer conversationally instead.\n\n" +
 
                     "== CLICKING ==\n" +
@@ -80,14 +93,14 @@ async function startLiveSession(mainWindow, automation) {
                             },
                             {
                                 name: "control_browser",
-                                description: "Controls Nova's browser. Use for explicit browser commands only: open (search/navigate), scroll (up/down), smart_click (click by visible text — use this for ALL clicks), search_youtube, close. For clicking always use smart_click with the visible text on screen — never call get_browser_state first. Never use for answering questions.",
+                                description: "Controls Nova's browser. Use for explicit browser commands only: open (search/navigate), scroll (up/down), smart_click (click by visible text — use this for ALL clicks), search_youtube, close, toggle_incognito (switch between normal and incognito mode). For clicking always use smart_click with the visible text on screen — never call get_browser_state first. Never use for answering questions.",
                                 parameters: {
                                     type: "OBJECT",
                                     properties: {
                                         action: {
                                             type: "STRING",
-                                            enum: ["open", "scroll", "smart_click", "search_youtube", "close"],
-                                            description: "The browser action to perform. Use smart_click for all clicks."
+                                            enum: ["open", "scroll", "smart_click", "search_youtube", "close", "toggle_incognito"],
+                                            description: "The browser action to perform. Use smart_click for all clicks. Use toggle_incognito to switch incognito mode on or off."
                                         },
                                         query: {
                                             type: "STRING",
@@ -199,24 +212,58 @@ async function startLiveSession(mainWindow, automation) {
                                 const { action, query, direction, element_id, target_text } = call.args;
                                 console.log(`🌍 [Browser Tool] Action: ${action}`);
 
+                                // Debounce: ignore duplicate browser actions within 3 seconds
+                                const nowBrowser = Date.now();
+                                if (nowBrowser - _lastBrowserActionAt < 3000) {
+                                    console.log(`🛡️ Browser action debounced — too soon after last action.`);
+                                    activeSession.sendRealtimeInput({
+                                        functionResponses: [{
+                                            id: call.id,
+                                            response: { status: "Skipped", message: "Already performed recently. Resume conversation." }
+                                        }]
+                                    });
+                                    return;
+                                }
+
+                                // Guard: 'close' is only valid if browser was actually opened this session
+                                if (action === 'close' && !_browserIsOpen) {
+                                    console.log('🛡️ Browser close ignored — browser is not open.');
+                                    activeSession.sendRealtimeInput({
+                                        functionResponses: [{
+                                            id: call.id,
+                                            response: { status: "Skipped", message: "Browser is not open. Resume conversation normally without mentioning the browser." }
+                                        }]
+                                    });
+                                    return;
+                                }
+
+                                _lastBrowserActionAt = nowBrowser;
+
                                 if (automationRef) {
                                     if (action === 'open') {
                                         automationRef.openBrowser(query || 'google');
+                                        _browserIsOpen = true;
                                     } else if (action === 'search_youtube') {
                                         automationRef.openBrowser({ platform: 'youtube', query });
+                                        _browserIsOpen = true;
                                     } else if (action === 'scroll') {
                                         automationRef.scrollBrowser(direction);
                                     } else if (action === 'click_id') {
                                         automationRef.clickBrowserId(element_id);
                                     } else if (action === 'smart_click') {
                                         automationRef.smartClickBrowser(target_text);
+                                    } else if (action === 'toggle_incognito') {
+                                        automationRef.toggleIncognito();
+                                        _browserIsOpen = true;  // reopens the browser
                                     } else if (action === 'close') {
-                                        // Block accidental close for 2 minutes after a research paper was opened
+                                        // Short cooldown: block accidental auto-close for 8s
+                                        // right after the research paper finishes rendering.
                                         const timeSinceResearch = Date.now() - (global.novaLastResearchDoneAt || 0);
-                                        if (timeSinceResearch < 120000) {
-                                            console.log('🛡️ Browser close blocked — research paper just opened.');
+                                        if (timeSinceResearch < 8000) {
+                                            console.log('🛡️ Browser close blocked — research paper just opened (8s guard).');
                                         } else {
                                             automationRef.closeBrowser();
+                                            _browserIsOpen = false;
                                         }
                                     }
                                 }
@@ -351,9 +398,14 @@ function endLiveSession() {
     }
 }
 
+function setBrowserOpen(value) {
+    _browserIsOpen = value;
+}
+
 module.exports = {
     startLiveSession,
     sendAudioChunk,
     sendTextChunk,
-    endLiveSession
+    endLiveSession,
+    setBrowserOpen
 };

@@ -384,48 +384,80 @@ function showResearchOverlay(topic) {
         document.body.appendChild(researchOverlay);
     }
     researchOverlay.style.cssText = `
-        position: absolute; top: 0; left: 0; right: 0; bottom: 0;
-        background: rgba(0, 4, 18, 0.93);
-        border: 1px solid rgba(0, 200, 255, 0.35);
-        border-radius: 8px;
+        position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(2, 6, 24, 0.97);
+        border: 1px solid rgba(0, 210, 255, 0.40);
+        border-radius: 12px;
         display: flex; flex-direction: column;
         align-items: center; justify-content: center;
-        z-index: 9999; padding: 18px;
-        box-shadow: 0 0 25px rgba(0, 180, 255, 0.18), inset 0 0 18px rgba(0, 0, 40, 0.6);
+        z-index: 99999; padding: 24px 22px 20px;
+        box-shadow: 0 0 40px rgba(0, 180, 255, 0.22), inset 0 0 20px rgba(0, 0, 40, 0.5);
+        font-family: monospace;
     `;
     researchOverlay.innerHTML = `
         <style>
-            @keyframes nova-spin { to { transform: rotate(360deg); } }
+            @keyframes nova-spin   { to { transform: rotate( 360deg); } }
             @keyframes nova-spin-r { to { transform: rotate(-360deg); } }
-            @keyframes nova-pulse { 0%,100%{opacity:1;} 50%{opacity:0.35;} }
-            @keyframes nova-bar { 0%{width:0%} 100%{width:100%} }
+            @keyframes nova-pulse  { 0%,100%{opacity:1;} 50%{opacity:0.35;} }
+            @keyframes nova-scan   { 0%{left:-40%;} 100%{left:110%;} }
+            @keyframes nova-dot    { 0%,80%,100%{opacity:0.2;} 40%{opacity:1;} }
         </style>
-        <div style="position:relative;width:48px;height:48px;margin-bottom:14px;flex-shrink:0;">
-            <div style="width:48px;height:48px;border:3px solid rgba(0,220,255,0.15);border-top:3px solid #0df;border-radius:50%;animation:nova-spin 1.1s linear infinite;position:absolute;"></div>
-            <div style="width:32px;height:32px;border:2px solid rgba(0,200,255,0.1);border-bottom:2px solid #0af;border-radius:50%;animation:nova-spin-r 0.75s linear infinite;position:absolute;top:8px;left:8px;"></div>
+
+        <!-- Dual spinner -->
+        <div style="position:relative;width:52px;height:52px;margin-bottom:16px;flex-shrink:0;">
+            <div style="width:52px;height:52px;border:2.5px solid rgba(0,220,255,0.12);border-top:2.5px solid #0df;border-radius:50%;animation:nova-spin 1.1s linear infinite;position:absolute;"></div>
+            <div style="width:34px;height:34px;border:2px solid rgba(0,180,255,0.10);border-bottom:2px solid #0af;border-radius:50%;animation:nova-spin-r 0.7s linear infinite;position:absolute;top:9px;left:9px;"></div>
+            <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:8px;height:8px;border-radius:50%;background:#0df;box-shadow:0 0 8px #0df;animation:nova-pulse 1.4s ease-in-out infinite;"></div>
         </div>
-        <div style="color:#0df;font-family:monospace;font-size:12px;font-weight:bold;letter-spacing:2px;text-shadow:0 0 8px #0df;animation:nova-pulse 2s ease-in-out infinite;margin-bottom:6px;text-align:center;">
-            RESEARCHING
+
+        <!-- Title -->
+        <div style="color:#0df;font-size:11px;font-weight:bold;letter-spacing:3px;text-shadow:0 0 10px #0df;animation:nova-pulse 2s ease-in-out infinite;margin-bottom:8px;text-align:center;">
+            NOVA RESEARCH ENGINE
         </div>
-        <div style="color:#aaa;font-family:monospace;font-size:9px;text-align:center;margin-bottom:10px;max-width:200px;line-height:1.5;word-break:break-word;font-style:italic;">
+
+        <!-- Topic -->
+        <div style="color:#8be;font-size:9.5px;text-align:center;margin-bottom:14px;max-width:290px;line-height:1.55;word-break:break-word;font-style:italic;opacity:0.85;">
             "${topic}"
         </div>
-        <div id="nova-research-status" style="color:#7bc;font-family:monospace;font-size:9px;text-align:center;max-width:210px;line-height:1.6;min-height:36px;word-break:break-word;">
+
+        <!-- Progress bar -->
+        <div style="width:100%;height:3px;background:rgba(0,200,255,0.10);border-radius:2px;margin-bottom:12px;overflow:hidden;position:relative;">
+            <div style="position:absolute;height:100%;width:40%;background:linear-gradient(90deg,transparent,#0df,transparent);border-radius:2px;animation:nova-scan 1.6s ease-in-out infinite;"></div>
+        </div>
+
+        <!-- Current step -->
+        <div id="nova-research-status" style="color:#7ce;font-size:9px;text-align:center;max-width:295px;line-height:1.65;min-height:30px;word-break:break-word;margin-bottom:10px;">
             Initializing research engines...
         </div>
-        <div style="width:180px;height:2px;background:rgba(0,200,255,0.12);border-radius:1px;margin-top:12px;overflow:hidden;">
-            <div style="height:100%;background:linear-gradient(90deg,#0af,#0df);border-radius:1px;animation:nova-bar 3s ease-in-out infinite alternate;"></div>
+
+        <!-- Step log (last 4 steps) -->
+        <div id="nova-research-log" style="width:100%;background:rgba(0,180,255,0.05);border:1px solid rgba(0,180,255,0.12);border-radius:6px;padding:6px 8px;max-height:72px;overflow:hidden;display:flex;flex-direction:column;gap:2px;">
         </div>
-        <div style="margin-top:10px;color:rgba(255,140,0,0.65);font-family:monospace;font-size:8px;text-align:center;letter-spacing:1px;">
+
+        <!-- Footer -->
+        <div style="margin-top:12px;color:rgba(255,160,0,0.60);font-size:7.5px;text-align:center;letter-spacing:1.5px;">
             VOICE PAUSED &bull; RESEARCH IN PROGRESS
         </div>
     `;
     researchOverlay.style.display = 'flex';
+    window._researchStepCount = 0;
 }
 
 function updateResearchStatus(message) {
-    const el = document.getElementById('nova-research-status');
-    if (el) el.innerText = message;
+    const statusEl = document.getElementById('nova-research-status');
+    if (statusEl) statusEl.innerText = message;
+
+    // Append to step log (keep last 4)
+    const logEl = document.getElementById('nova-research-log');
+    if (logEl) {
+        window._researchStepCount = (window._researchStepCount || 0) + 1;
+        const row = document.createElement('div');
+        row.style.cssText = 'color:rgba(100,200,255,0.65);font-size:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+        row.innerText = `› ${message}`;
+        logEl.appendChild(row);
+        // Keep only last 4 rows
+        while (logEl.children.length > 4) logEl.removeChild(logEl.firstChild);
+    }
 }
 
 function hideResearchOverlay() {
@@ -801,27 +833,51 @@ async function initOfflineVoice() {
         // --- WebSockets Audio Playback Engine ---
         let audioQueue = [];
         let isPlayingLive = false;
+        let livePlaybackStuckTimer = null;       // Watchdog for stuck isPlayingLive
         const livePlaybackContext = new window.AudioContext({ sampleRate: 24000 });
+
+        function resetLivePlayback() {
+            isPlayingLive = false;
+            window.novaState.isSpeaking = false;
+            listeningSymbol.style.display = 'none';
+            if (livePlaybackStuckTimer) { clearTimeout(livePlaybackStuckTimer); livePlaybackStuckTimer = null; }
+        }
 
         async function playLiveQueue() {
             if (isPlayingLive || audioQueue.length === 0) return;
+
+            // Resume AudioContext if it was suspended (Chromium autoplay policy)
+            if (livePlaybackContext.state === 'suspended') {
+                await livePlaybackContext.resume().catch(() => {});
+            }
+
             isPlayingLive = true;
             window.novaState.isSpeaking = true;
             listeningSymbol.innerHTML = '🔊 Speaking...';
             listeningSymbol.style.display = 'block';
 
             const audioBuffer = audioQueue.shift();
+
+            // Safety watchdog: if onended never fires within 20s, force-reset
+            if (livePlaybackStuckTimer) clearTimeout(livePlaybackStuckTimer);
+            livePlaybackStuckTimer = setTimeout(() => {
+                if (isPlayingLive) {
+                    console.warn('[Live Audio] Watchdog: resetting stuck playback state');
+                    resetLivePlayback();
+                    if (audioQueue.length > 0) playLiveQueue();
+                }
+            }, 20000);
+
             const source = livePlaybackContext.createBufferSource();
             source.buffer = audioBuffer;
             source.connect(livePlaybackContext.destination);
             source.onended = () => {
+                if (livePlaybackStuckTimer) { clearTimeout(livePlaybackStuckTimer); livePlaybackStuckTimer = null; }
                 if (audioQueue.length > 0) {
                     isPlayingLive = false;
                     playLiveQueue();
                 } else {
-                    isPlayingLive = false;
-                    window.novaState.isSpeaking = false;
-                    listeningSymbol.style.display = 'none';
+                    resetLivePlayback();
                 }
             };
             source.start();
@@ -854,6 +910,8 @@ async function initOfflineVoice() {
             }
             if (status.event === 'closed') {
                 window.novaState.isLiveActive = false;
+                audioQueue = [];
+                resetLivePlayback();      // Clear any audio state from the dropped session
                 uiLog("⚪ [LIVE] Bi-directional mode ended");
                 // Auto-reconnect if the user is still awake — the session dropped unexpectedly
                 if (window.novaState.isAwake && !window.novaState.isResearching) {
@@ -866,7 +924,8 @@ async function initOfflineVoice() {
                 }
             }
             if (status.event === 'interrupted') {
-                audioQueue = []; // Clear queue on interrupt
+                audioQueue = [];          // Clear queue on interrupt
+                resetLivePlayback();      // Also clear the stuck-speaking state
             }
             if (status.event === 'closed' && status.code === 1007) {
                 console.log("❌ API Key Error: Google dropped the connection");
@@ -1092,11 +1151,14 @@ async function processCommand(cmd) {
     const _researchCooldownElapsed = Date.now() - (window.novaState.researchJustCompleted || 0);
     if (_researchCooldownElapsed > 600000) {
     const normalized_rp = cmd.toLowerCase().trim();
-        const researchMatch =
+        // Guard: if user says "open/show/find/display ... research paper", this is a file-open request — never create
+        const _isOpenFileIntent = /\b(?:open|show|find|display|locate|get)\b/i.test(normalized_rp);
+        const researchMatch = _isOpenFileIntent ? null : (
             normalized_rp.match(/\b(?:write|create|generate|make|build|prepare|do|compose)\b.*?\b(?:research\s+paper|academic\s+paper|scientific\s+paper|research\s+essay|research\s+report)\b.*?\b(?:about|on|regarding|covering|for|of)\b\s*(.+)/i)
             || normalized_rp.match(/\b(?:write|create|generate|make|compose)\b.*?\b(?:paper|essay|report)\b.*?\b(?:about|on|regarding)\b\s*(.+)/i)
             || normalized_rp.match(/\b(?:research|academic)\s+paper\b\s+(?:about|on|for|regarding)\s+(.+)/i)
-            || normalized_rp.match(/\b(?:research\s+paper|academic\s+paper)\b.*?\bon\s+(.+)/i);
+            || normalized_rp.match(/\b(?:research\s+paper|academic\s+paper)\b.*?\bon\s+(.+)/i)
+        );
 
         if (researchMatch) {
             const rawTopic = researchMatch[1] || researchMatch[0];
@@ -1184,9 +1246,55 @@ async function processCommand(cmd) {
         return;
     }
 
-    // 📁 DIRECT FOLDER OPENING (Bypass AI)
-    if (normalized.match(/\b(open|show|go to)\b.*?\b(folder|directory|dir|documents|downloads|desktop|project)\b/i)) {
-        uiLog(`📁 Opening ${normalized}...`);
+    // 📁 DIRECT FOLDER / FILE OPENING (Bypass AI)
+
+    // 1. System-named folders → fast path through execute-automation
+    const sysFolderMatch = normalized.match(
+        /\b(open|show|go to)\b.*?\b(documents|downloads|desktop|pictures|music|videos|home|temp)\b/i
+    );
+    if (sysFolderMatch) {
+        uiLog(`📁 Opening system folder: ${normalized}...`);
+        ipcRenderer.invoke('execute-automation', normalized);
+        window.novaState.isProcessingCommand = false;
+        return;
+    }
+
+    // 2. File with extension → search & open the file
+    const fileOpenMatch = normalized.match(
+        /\b(open|show|find)\b\s+(?:my\s+|the\s+)?(.+?\.(txt|pdf|docx?|xlsx?|pptx?|png|jpe?g|mp4|mp3|zip|csv|json|js|ts|py|sh|md))\b/i
+    );
+    if (fileOpenMatch) {
+        const fileName = fileOpenMatch[2].trim();
+        uiLog(`📂 Searching for file: ${fileName}...`);
+        window.novaState.isProcessingCommand = true;
+        ipcRenderer.invoke('find-and-open-file', fileName).then(res => {
+            if (res.error) speak(`I couldn't find ${fileName} on your system.`);
+            else speak(`Opening ${res.opened}.`);
+            window.novaState.isProcessingCommand = false;
+        });
+        return;
+    }
+
+    // 3. Named folder (explicit "folder"/"directory" word) → search & open
+    const namedFolderMatch = normalized.match(
+        /\b(open|show|go to)\b\s+(?:the\s+|my\s+)?(.+?)\s+(?:folder|directory)\b/i
+    );
+    if (namedFolderMatch) {
+        const folderName = namedFolderMatch[2].trim();
+        uiLog(`📂 Searching for folder: ${folderName}...`);
+        window.novaState.isProcessingCommand = true;
+        ipcRenderer.invoke('find-and-open-file', folderName).then(res => {
+            if (res.error) speak(`I couldn't find a folder named ${folderName}.`);
+            else speak(`Opening ${res.opened}.`);
+            window.novaState.isProcessingCommand = false;
+        });
+        return;
+    }
+
+    // 4. "open <name>" without "folder" keyword — pass to execute-automation so it
+    //    can try app-launch first, then fall back to folder search in main.js
+    if (normalized.match(/\b(open|go to|show)\b.*?\b(dir|directory|folder|project)\b/i)) {
+        uiLog(`📁 Opening folder: ${normalized}...`);
         ipcRenderer.invoke('execute-automation', normalized);
         window.novaState.isProcessingCommand = false;
         return;

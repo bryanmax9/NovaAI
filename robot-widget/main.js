@@ -5,7 +5,7 @@ const { spawn, exec } = require('child_process');
 const { generateSpeech } = require('./tts.js');
 const { askGemini } = require('./gemini.js');
 const { transcribeAudio } = require('./stt.js');
-const { startLiveSession, sendAudioChunk, sendTextChunk, endLiveSession } = require('./live.js');
+const { startLiveSession, sendAudioChunk, sendTextChunk, endLiveSession, setBrowserOpen } = require('./live.js');
 
 // Terminate Chromium's Autoplay sandbox. We are a desktop app, not a website!
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -202,6 +202,7 @@ function closeBrowser() {
         browserWin.close();
         browserWin = null;
     }
+    setBrowserOpen(false);
 }
 
 function getDomMap() {
@@ -225,6 +226,7 @@ const Automation = {
     openBrowser,
     scrollBrowser,
     closeBrowser,
+    toggleIncognito,
     getDomMap,
     clickBrowserId,
     smartClickBrowser,
@@ -247,7 +249,7 @@ ipcMain.handle('execute-automation', async (event, action) => {
     return await executeAutomationInternal(action.trim());
 });
 
-function createBrowserWindow() {
+function createBrowserWindow(incognito = false) {
     if (browserWin) {
         if (browserWin.isMinimized()) browserWin.restore();
         browserWin.focus();
@@ -257,7 +259,7 @@ function createBrowserWindow() {
     browserWin = new BrowserWindow({
         width: 1024,
         height: 768,
-        title: 'Nova Browser Agent',
+        title: incognito ? 'Nova Browser Agent — Incognito' : 'Nova Browser Agent',
         autoHideMenuBar: true,
         webPreferences: {
             nodeIntegration: true,
@@ -268,13 +270,28 @@ function createBrowserWindow() {
         }
     });
 
-    browserWin.loadFile(path.join(__dirname, 'browser.html'));
+    browserWin.loadFile(path.join(__dirname, 'browser.html'), {
+        query: { incognito: incognito ? '1' : '0' }
+    });
 
     browserWin.on('closed', () => {
         browserWin = null;
         isBrowserReady = false;
         pendingBrowserUrl = null;
+        setBrowserOpen(false);  // Sync live.js flag when window is closed by user
     });
+}
+
+function toggleIncognito() {
+    // Close the current browser (any mode) and reopen as incognito
+    const alreadyIncognito = browserWin && browserWin.getTitle().includes('Incognito');
+    closeBrowser();
+    // Brief delay so the old window fully closes before opening the new one
+    setTimeout(() => {
+        createBrowserWindow(!alreadyIncognito);
+        setBrowserOpen(true);
+        isBrowserReady = false;
+    }, 150);
 }
 
 ipcMain.on('open-chat', () => {
@@ -549,6 +566,14 @@ async function executeAutomationInternal(command) {
 
     // 2. PRIORITY: Application Closing (Catch this before "Opening" logic matches keywords like 'code')
     if (cmd.includes('close ') || cmd.includes('terminate ') || cmd.startsWith('close-')) {
+        // Intercept file-manager close requests before trying pkill with the folder name
+        const fileManagerWords = /\b(file\s*manager|file\s*explorer|explorer|dolphin|nautilus|thunar|nemo|folder|files|finder)\b/i;
+        if (fileManagerWords.test(cmd)) {
+            console.log('📂 Closing file manager windows...');
+            closeFileManagers();
+            return 'File manager closed.';
+        }
+
         const appName = cmd.replace(/close |terminate |close-/g, '').trim();
         const platform = process.platform;
 
@@ -597,26 +622,54 @@ async function executeAutomationInternal(command) {
         }
     }
 
-    // 4. Folder commands
-    if (cmd.includes('folder') || cmd.includes('directory') || cmd.includes('dir')) {
-        const homeDir = app.getPath('home');
-        let targetPath = homeDir;
-        let folderName = 'Home';
+    // 4. Folder / file opening
+    if (cmd.includes('folder') || cmd.includes('directory') || cmd.includes('dir') ||
+        cmd.match(/\b(open|show|go to)\b.*?\b(file|folder|directory)\b/i) ||
+        cmd.match(/\bopen\b.+\.(txt|pdf|docx?|xlsx?|pptx?|png|jpg|jpeg|mp4|mp3|zip|csv|json|js|ts|py|sh|md)\b/i)) {
 
-        if (cmd.includes('documents')) {
-            targetPath = app.getPath('documents');
-            folderName = 'Documents';
-        } else if (cmd.includes('downloads')) {
-            targetPath = app.getPath('downloads');
-            folderName = 'Downloads';
-        } else if (cmd.includes('desktop')) {
-            targetPath = app.getPath('desktop');
-            folderName = 'Desktop';
+        const homeDir = app.getPath('home');
+
+        // ── Named system folders (checked first — fast path) ─────────────────
+        const SYSTEM_FOLDERS = {
+            documents:  app.getPath('documents'),
+            downloads:  app.getPath('downloads'),
+            desktop:    app.getPath('desktop'),
+            pictures:   app.getPath('pictures'),
+            music:      app.getPath('music'),
+            videos:     app.getPath('videos'),
+            home:       homeDir,
+            temp:       app.getPath('temp'),
+        };
+        for (const [sysName, folderPath] of Object.entries(SYSTEM_FOLDERS)) {
+            if (cmd.includes(sysName)) {
+                console.log(`📂 Opening system folder: ${folderPath}`);
+                openFolderExclusive(folderPath);
+                return `${sysName.charAt(0).toUpperCase() + sysName.slice(1)} folder opened.`;
+            }
         }
 
-        console.log(`📂 Opening path: ${targetPath}`);
-        shell.openPath(targetPath);
-        return `${folderName} folder opened.`;
+        // ── Arbitrary folder/file search (speech-aware, multi-variant) ────────
+        // Strip the verb + the trailing "folder/file/directory" word from the command
+        const nameMatch = cmd.match(/(?:open|show|go to|find)\s+(?:the\s+|my\s+)?(?:file\s+|folder\s+)?(.+?)(?:\s+(?:folder|file|directory))?$/i);
+        const searchName = nameMatch ? nameMatch[1].trim() : null;
+
+        if (searchName && searchName.length > 1) {
+            console.log(`🔍 Searching filesystem for: "${searchName}"`);
+            try {
+                const result = await findFileOrFolder(searchName, homeDir);
+                if (result) {
+                    openFileByExtension(result);   // Extension-aware: html→browser, code→vscode, etc.
+                    return `Opening ${path.basename(result)}.`;
+                }
+            } catch (e) {
+                console.error('File search error:', e);
+            }
+            return `I couldn't find "${searchName}" on your system.`;
+        }
+
+        // Fallback: open home
+        openFolderExclusive(homeDir);
+        return 'Home folder opened.';
     }
 
     // 5. APP LAUNCH — check BEFORE generic search routing so "open zoom", "open docs", etc.
@@ -845,12 +898,28 @@ async function focusAppInternal(appName) {
     const entry = APP_FOCUS_MAP[key];
 
     if (!entry) {
-        // Unknown app — just try launching it directly by name
-        console.log(`🔍 Unknown app "${appName}", attempting direct launch...`);
-        exec(appName, (err) => {
-            if (err) console.error(`❌ Direct launch of "${appName}" failed:`, err);
-        });
-        return `Trying to open ${appName} for you.`;
+        // Unknown app — first check if it's a folder/file name, then try direct launch.
+        // This handles "open HandDetectionRobot" without the user needing to say "folder".
+        const homeDir = app.getPath('home');
+        const fsResult = await findFileOrFolder(appName, homeDir);
+        if (fsResult) {
+            console.log(`📂 Resolved "${appName}" as filesystem path: ${fsResult}`);
+            openFileByExtension(fsResult);   // Extension-aware: html→browser, code→vscode, etc.
+            return `Opening ${path.basename(fsResult)}.`;
+        }
+
+        // Nothing found on disk — try executing it as an app command (single-word apps like "zoom")
+        // Only attempt if the name looks like a real executable (no spaces, or a known pattern)
+        const isSingleWord = !appName.includes(' ');
+        if (isSingleWord) {
+            console.log(`🔍 Unknown app "${appName}", attempting direct launch...`);
+            exec(appName, (err) => {
+                if (err) console.error(`❌ Direct launch of "${appName}" failed:`, err);
+            });
+            return `Trying to open ${appName} for you.`;
+        }
+
+        return `I couldn't find "${appName}" as an app or folder on your system.`;
     }
 
     console.log(`🎯 Focusing app: "${appName}" (entry: ${JSON.stringify(entry)})`);
@@ -1222,6 +1291,24 @@ async function generateResearchPaper(topic, mainWindow) {
     // Notify renderer immediately so it can show the overlay and block all other commands
     if (mainWindow) mainWindow.webContents.send('research-paper-started', { topic });
 
+    // Expand the widget window to show the full research progress overlay.
+    // Save the current bounds so we can restore them exactly when done.
+    const RESEARCH_W = 360;
+    const RESEARCH_H = 300;
+    let _savedBounds = null;
+    if (mainWindow) {
+        _savedBounds = mainWindow.getBounds();
+        const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
+        mainWindow.setResizable(true);
+        mainWindow.setBounds({
+            x: Math.round((sw - RESEARCH_W) / 2),
+            y: Math.round((sh - RESEARCH_H) / 2),
+            width: RESEARCH_W,
+            height: RESEARCH_H
+        }, true); // animate on macOS
+        mainWindow.setResizable(false);
+    }
+
     const sendProgress = (step, detail) => {
         console.log(`📄 [Research] ${step}: ${detail}`);
         if (mainWindow) mainWindow.webContents.send('research-paper-progress', { step, detail });
@@ -1241,8 +1328,9 @@ async function generateResearchPaper(topic, mainWindow) {
         const gatheredContent = [];
         const citationMap = new Map();
 
+        const sourceLabels = ['IEEE & arXiv', 'PubMed & Scholar', 'ResearchGate & ACM', 'Web of Science'];
         for (let idx = 0; idx < searchQueries.length; idx++) {
-            sendProgress('searching', `Academic search ${idx + 1} of 4: querying "${topic}"...`);
+            sendProgress('searching', `[${idx + 1}/4] Searching ${sourceLabels[idx] || 'academic databases'}...`);
             try {
                 const res = await ai.models.generateContent({
                     model: 'gemini-2.5-flash',
@@ -1277,7 +1365,7 @@ async function generateResearchPaper(topic, mainWindow) {
         const citations = Array.from(citationMap.values());
 
         // Phase 2: Write the full research paper
-        sendProgress('writing', 'Writing the full research paper with APA citations...');
+        sendProgress('writing', `[5/6] Writing paper with ${citations.length} citations (APA format)...`);
 
         const currentYear = new Date().getFullYear();
         const citationList = citations
@@ -1403,7 +1491,7 @@ WRITE THE COMPLETE PAPER NOW:`;
         }
 
         // Phase 3: Save to Desktop and open
-        sendProgress('saving', 'Formatting and saving to your Desktop...');
+        sendProgress('saving', '[6/6] Formatting HTML and saving to Desktop...');
 
         const desktopPath = path.join(os.homedir(), 'Desktop');
         const safeTopic = topic
@@ -1422,11 +1510,18 @@ WRITE THE COMPLETE PAPER NOW:`;
         setTimeout(() => {
             if (browserWin) browserWin.webContents.send('navigate', `file://${filePath}`);
         }, 600);
+        setBrowserOpen(true);   // Allow Gemini to close the browser after the paper is done
 
         global.novaIsResearching = false;
         global.novaLastResearchDoneAt = Date.now();
         if (mainWindow) {
             mainWindow.webContents.send('research-paper-done', { success: true, filePath, fileName });
+            // Restore the widget to its original size and position
+            if (_savedBounds) {
+                mainWindow.setResizable(true);
+                mainWindow.setBounds(_savedBounds, true);
+                mainWindow.setResizable(false);
+            }
         }
 
     } catch (err) {
@@ -1435,9 +1530,420 @@ WRITE THE COMPLETE PAPER NOW:`;
         global.novaLastResearchDoneAt = Date.now();
         if (mainWindow) {
             mainWindow.webContents.send('research-paper-done', { success: false, error: err.message });
+            // Restore even on error
+            if (_savedBounds) {
+                mainWindow.setResizable(true);
+                mainWindow.setBounds(_savedBounds, true);
+                mainWindow.setResizable(false);
+            }
         }
     }
 }
+
+// ── Open a file with the appropriate application based on its extension ──────
+// Directories go to the file manager; .html opens in Nova browser; code files
+// open in VS Code; Office docs open in the matching Office/LibreOffice app;
+// everything else falls back to xdg-open / open / start.
+function openFileByExtension(filePath) {
+    const ext = path.extname(filePath).toLowerCase();
+    const plat = process.platform;
+
+    // ── Escape the path for safe use in shell strings ─────────────────────
+    // Wraps in double-quotes and escapes any embedded double-quotes.
+    const q = (p) => `"${p.replace(/"/g, '\\"')}"`;
+    // Windows-safe path (backslashes already work in PowerShell with double-quotes)
+    const qWin = (p) => `"${p.replace(/"/g, '""')}"`;
+
+    // ── Cross-platform: open with system default handler ──────────────────
+    const openDefault = () => {
+        if (plat === 'darwin')      { exec(`open ${q(filePath)}`); }
+        else if (plat === 'win32')  { exec(`start "" ${qWin(filePath)}`); }
+        else                        { exec(`xdg-open ${q(filePath)}`); }
+    };
+
+    // ── Directory → file manager (existing behavior) ──────────────────────
+    let stat;
+    try { stat = fs.statSync(filePath); } catch { stat = null; }
+    if (!stat || stat.isDirectory()) {
+        openFolderExclusive(filePath);
+        return;
+    }
+
+    // ── HTML / HTM → Nova internal browser (all platforms) ───────────────
+    if (ext === '.html' || ext === '.htm') {
+        createBrowserWindow();
+        setTimeout(() => {
+            if (browserWin) browserWin.webContents.send('navigate', `file://${filePath}`);
+        }, 600);
+        setBrowserOpen(true);
+        return;
+    }
+
+    // ── Code & plain-text → VS Code, fallback to system default ──────────
+    // VS Code CLI is 'code' on all three platforms when installed normally.
+    const codeExts = new Set([
+        '.js', '.ts', '.jsx', '.tsx', '.mjs', '.cjs',
+        '.py', '.rb', '.go', '.rs', '.java', '.kt', '.swift',
+        '.c', '.cpp', '.cc', '.cxx', '.h', '.hpp',
+        '.cs', '.php', '.lua', '.r', '.m', '.scala',
+        '.sh', '.bash', '.zsh', '.fish',
+        '.ps1',                                // PowerShell on Windows
+        '.json', '.jsonc', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf',
+        '.xml', '.css', '.scss', '.less', '.sass',
+        '.md', '.markdown', '.rst', '.txt', '.log', '.env', '.gitignore',
+        '.sql', '.graphql', '.proto', '.dart', '.vue', '.svelte'
+    ]);
+    if (codeExts.has(ext)) {
+        // Try VS Code; if not in PATH fall through to system default
+        exec(`code ${q(filePath)}`, (err) => {
+            if (err) openDefault();
+        });
+        return;
+    }
+
+    // ── PDF → system default viewer (Preview/Acrobat/Evince/Edge) ─────────
+    if (ext === '.pdf') {
+        openDefault();
+        return;
+    }
+
+    // ── Word-processor docs ───────────────────────────────────────────────
+    // Linux: try LibreOffice Writer → xdg-open fallback
+    // macOS/Windows: system default handles Pages, MS Word, LibreOffice equally
+    const writerExts = new Set(['.docx', '.doc', '.odt', '.rtf', '.fodt']);
+    if (writerExts.has(ext)) {
+        if (plat === 'linux') {
+            exec(`libreoffice --writer ${q(filePath)}`, (err) => {
+                if (err) exec(`xdg-open ${q(filePath)}`);
+            });
+        } else {
+            openDefault();
+        }
+        return;
+    }
+
+    // ── Spreadsheets ──────────────────────────────────────────────────────
+    const calcExts = new Set(['.xlsx', '.xls', '.ods', '.csv', '.fods']);
+    if (calcExts.has(ext)) {
+        if (plat === 'linux') {
+            exec(`libreoffice --calc ${q(filePath)}`, (err) => {
+                if (err) exec(`xdg-open ${q(filePath)}`);
+            });
+        } else {
+            openDefault();
+        }
+        return;
+    }
+
+    // ── Presentations ─────────────────────────────────────────────────────
+    const impressExts = new Set(['.pptx', '.ppt', '.odp', '.fodp']);
+    if (impressExts.has(ext)) {
+        if (plat === 'linux') {
+            exec(`libreoffice --impress ${q(filePath)}`, (err) => {
+                if (err) exec(`xdg-open ${q(filePath)}`);
+            });
+        } else {
+            openDefault();
+        }
+        return;
+    }
+
+    // ── Images, video, audio, archives, and everything else ──────────────
+    openDefault();
+}
+
+// ── Close any open file-manager windows before opening a new path ────────────
+// Returns a Promise that resolves after the managers have had time to exit.
+function closeFileManagers() {
+    return new Promise((resolve) => {
+        if (process.platform === 'linux') {
+            // SIGKILL (-9) cannot be caught or ignored — more reliable than SIGTERM on KDE/Dolphin
+            exec('killall -9 dolphin 2>/dev/null; killall -9 dolphin5 2>/dev/null; ' +
+                 'killall -9 nautilus 2>/dev/null; killall -9 thunar 2>/dev/null; ' +
+                 'killall -9 nemo 2>/dev/null; killall -9 pcmanfm 2>/dev/null; killall -9 spacefm 2>/dev/null',
+                () => setTimeout(resolve, 800)); // 800ms: KDE needs a bit more time to fully release
+        } else if (process.platform === 'darwin') {
+            exec('osascript -e \'tell application "Finder" to close every window\' 2>/dev/null',
+                () => setTimeout(resolve, 300));
+        } else if (process.platform === 'win32') {
+            exec('powershell -NoProfile -Command "' +
+                 "(New-Object -ComObject Shell.Application).Windows() | " +
+                 "ForEach-Object { $_.Quit() }\"",
+                () => setTimeout(resolve, 400));
+        } else {
+            resolve();
+        }
+    });
+}
+
+// ── Spawn the platform file manager directly (bypasses D-Bus single-instance) ─
+// shell.openPath on KDE tells the running Dolphin to open a new TAB — we don't want that.
+// Spawning 'dolphin <path>' after killing the old instance always opens a fresh window.
+function spawnFileManager(targetPath) {
+    const platform = process.platform;
+    if (platform === 'linux') {
+        // Detect installed file manager; prefer dolphin (KDE), then nautilus, then xdg-open fallback
+        exec(`which dolphin 2>/dev/null`, (err, out) => {
+            if (out.trim()) {
+                exec(`dolphin "${targetPath}" &`);
+            } else {
+                exec(`which nautilus 2>/dev/null`, (err2, out2) => {
+                    if (out2.trim()) exec(`nautilus "${targetPath}" &`);
+                    else exec(`xdg-open "${targetPath}" &`);
+                });
+            }
+        });
+    } else if (platform === 'darwin') {
+        exec(`open "${targetPath}"`);
+    } else if (platform === 'win32') {
+        exec(`explorer "${targetPath}"`);
+    } else {
+        shell.openPath(targetPath); // safe fallback for unknown platforms
+    }
+}
+
+// ── Context tracking: remember the last folder the user opened ───────────────
+// Used to prioritise searching inside that directory before going global.
+let currentOpenPath = null;
+
+// ── Global folder-open lock (prevents simultaneous multi-window openings) ────
+let _folderOpenLock = false;
+async function openFolderExclusive(targetPath) {
+    if (_folderOpenLock) {
+        console.log('🛡️ Folder open already in progress — skipping duplicate:', targetPath);
+        return;
+    }
+    _folderOpenLock = true;
+    try {
+        await closeFileManagers();   // wait for old windows to fully die (SIGKILL + 800ms)
+        spawnFileManager(targetPath); // spawn fresh independent process — no D-Bus tab reuse
+        // Track context: if it's a directory, remember it; if it's a file, remember its parent
+        try {
+            const stat = fs.statSync(targetPath);
+            currentOpenPath = stat.isDirectory() ? targetPath : path.dirname(targetPath);
+        } catch { currentOpenPath = path.dirname(targetPath); }
+        console.log(`📂 Opened: ${targetPath}  (context → ${currentOpenPath})`);
+    } finally {
+        setTimeout(() => { _folderOpenLock = false; }, 2500); // 2.5s cooldown
+    }
+}
+
+// ── Levenshtein distance (for fuzzy name matching) ────────────────────────────
+function levenshtein(a, b) {
+    const m = a.length, n = b.length;
+    if (m === 0) return n;
+    if (n === 0) return m;
+    const dp = Array.from({length: m + 1}, (_, i) => [i, ...Array(n).fill(0)]);
+    for (let j = 1; j <= n; j++) dp[0][j] = j;
+    for (let i = 1; i <= m; i++) {
+        for (let j = 1; j <= n; j++) {
+            dp[i][j] = a[i-1] === b[j-1] ? dp[i-1][j-1] :
+                1 + Math.min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]);
+        }
+    }
+    return dp[m][n];
+}
+
+// ── Split CamelCase/PascalCase/acronyms into space-separated words ────────────
+// "CodingRelated" → "Coding Related"
+// "WebARDevelopment" → "Web AR Development"
+// "AsosiacionDelComercioCEGK" → "Asosiacion Del Comercio CEGK"
+function splitCamelCase(s) {
+    return s
+        .replace(/([a-z])([A-Z])/g, '$1 $2')           // fooBar → foo Bar
+        .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2');    // HTMLParser → HTML Parser
+}
+
+// ── Fuzzy search within a specific directory ──────────────────────────────────
+// Uses two independent scores and picks the highest:
+//   • Word-overlap: fraction of search words that appear (prefix-matched) in the filename words
+//   • Levenshtein: character-level similarity on joined tokens
+// Filenames have CamelCase split, extension stripped, and timestamps removed before scoring
+// so "CodingRelated" → "coding related", "Research_Paper_...944.html" → "research paper..."
+//
+// minScore: caller can pass a lower threshold for "best effort" fallback matching
+function findInDir(searchName, dirPath, minScore = 0.65) {
+    if (!dirPath) return null;
+    let entries;
+    try { entries = fs.readdirSync(dirPath); } catch { return null; }
+    if (!entries.length) return null;
+
+    // Normalise to space-separated lowercase words, strip all non-alphanumeric
+    const normWords = s => s.toLowerCase()
+        .replace(/['"`:;,!?()[\]{}]/g, ' ')   // punctuation → space
+        .replace(/[-_./\\]+/g, ' ')             // separators → space
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    // Strip extension + trailing timestamps + split CamelCase from a filename
+    const normFile = s => {
+        const noExt = s.replace(/\.[^.]+$/, '');          // strip extension
+        const camelSplit = splitCamelCase(noExt);          // CodingRelated → Coding Related
+        return normWords(camelSplit)
+            .replace(/\b\d{6,}\b/g, '')                   // strip 6+ digit number sequences
+            .replace(/\s+/g, ' ').trim();
+    };
+
+    const searchNormWords = normWords(searchName);
+    const searchWords = searchNormWords.split(' ').filter(w => w.length > 1);
+    const searchJoined = searchNormWords.replace(/\s+/g, '');
+
+    let best = null, bestScore = 0;
+
+    for (const entry of entries) {
+        const fileNormWords = normFile(entry);
+        const fileWords = fileNormWords.split(' ').filter(w => w.length > 1);
+        const fileJoined = fileNormWords.replace(/\s+/g, '');
+
+        // Score 1 — Word overlap: how many search words appear in the filename
+        // Uses prefix matching to handle plurals ("impact" matches "impacts")
+        let matchedWords = 0;
+        for (const sw of searchWords) {
+            if (fileWords.some(fw => fw.startsWith(sw) || sw.startsWith(fw))) matchedWords++;
+        }
+        const wordScore = searchWords.length > 0 ? matchedWords / searchWords.length : 0;
+
+        // Score 2 — Levenshtein on joined (separator-free) tokens
+        const maxLen = Math.max(searchJoined.length, fileJoined.length) || 1;
+        const levScore = 1 - levenshtein(searchJoined, fileJoined) / maxLen;
+
+        // Final score: take whichever signal is stronger
+        const score = Math.max(wordScore, levScore);
+
+        if (score >= minScore && score > bestScore) {
+            bestScore = score;
+            best = path.join(dirPath, entry);
+        }
+    }
+    if (best) console.log(`🎯 Context match in "${dirPath}": "${path.basename(best)}" (score=${(bestScore*100).toFixed(0)}%)`);
+    return best;
+}
+
+// ── Build name variants to bridge speech gaps ─────────────────────────────────
+// "ai website cloner" → ["aiwebsitecloner","ai-website-cloner","ai_website_cloner","AiWebsiteCloner",...]
+function nameVariants(raw) {
+    const clean = raw.replace(/[^a-zA-Z0-9\s]/g, ' ').trim();
+    const words  = clean.split(/\s+/);
+    const joined = words.join('');
+    const dashed = words.join('-');
+    const under  = words.join('_');
+    const pascal = words.map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('');
+    const camel  = words[0] + words.slice(1).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('');
+    // de-duplicate while preserving order
+    return [...new Set([clean, joined, dashed, under, pascal, camel])].filter(v => v.length > 1);
+}
+
+// ── Cross-platform file/folder search ────────────────────────────────────────
+// Phase 1: fuzzy-match inside currentOpenPath (context-aware, handles STT phonetic errors)
+// Phase 2: variant-based find/locate across the whole home tree (global fallback)
+function findFileOrFolder(name, searchRoot) {
+    return new Promise((resolve) => {
+        // Sanitise: strip surrounding quotes, colons, semicolons, and collapse whitespace.
+        // Gemini sometimes wraps filenames in quotes or adds a colon after a title word.
+        const cleanName = name
+            .replace(/^["'`]+|["'`]+$/g, '')   // strip leading/trailing quote chars
+            .replace(/[:;]/g, ' ')               // colon/semicolons → space
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        const platform  = process.platform;
+        const variants  = nameVariants(cleanName);
+
+        // ── Phase 1: context-aware fuzzy search in the current open directory ─
+        if (currentOpenPath) {
+            const ctxResult = findInDir(cleanName, currentOpenPath);
+            if (ctxResult) return resolve(ctxResult);
+        }
+
+        // ── Phase 1b: always check Desktop — research papers, downloads, etc. land here ─
+        const desktopPath = app.getPath('desktop');
+        if (desktopPath !== currentOpenPath) {
+            const desktopResult = findInDir(cleanName, desktopPath);
+            if (desktopResult) return resolve(desktopResult);
+        }
+
+        // ── Phase 1c: check Downloads as another high-probability location ────
+        const downloadsPath = app.getPath('downloads');
+        if (downloadsPath !== currentOpenPath) {
+            const dlResult = findInDir(cleanName, downloadsPath);
+            if (dlResult) return resolve(dlResult);
+        }
+
+        // ── Best-effort fallback: re-check current dir with a lower threshold ─
+        // Used when global search also finds nothing — prefer "closest thing in sight"
+        // over returning null and saying "not found".
+        const bestEffortFallback = () => {
+            if (currentOpenPath) {
+                const soft = findInDir(cleanName, currentOpenPath, 0.40);
+                if (soft) { console.log(`🔁 Best-effort match in context dir`); return resolve(soft); }
+            }
+            const softDesktop = findInDir(cleanName, app.getPath('desktop'), 0.40);
+            if (softDesktop) { console.log(`🔁 Best-effort match on Desktop`); return resolve(softDesktop); }
+            resolve(null);
+        };
+
+        console.log(`🔍 Searching variants: ${variants.join(', ')}`);
+
+        if (platform === 'linux') {
+            // Build one locate call per variant (if installed)
+            const locateCmds = variants
+                .map(v => `locate -i -l 5 -e "*${v}*" 2>/dev/null`)
+                .join(' ; ');
+
+            // find: exclude hidden dirs (.cache, .local, .config, node_modules) for clean results
+            const findNames = variants.map(v => `-iname "*${v}*"`).join(' -o ');
+            const findCmd   = `find "${searchRoot}" -maxdepth 5 ` +
+                              `-not -path '*/\\.*' -not -path '*/node_modules/*' ` +
+                              `\\( ${findNames} \\) -print 2>/dev/null | head -1`;
+
+            exec(`( ${locateCmds} ) 2>/dev/null | grep -v '/\\.' | head -1`, { timeout: 6000 }, (err, stdout) => {
+                const found = (stdout || '').trim().split('\n')[0].trim();
+                if (found) return resolve(found);
+                // locate not installed or returned nothing — fall back to find
+                exec(findCmd, { timeout: 10000 }, (err2, stdout2) => {
+                    const result = (stdout2 || '').trim().split('\n')[0].trim();
+                    if (result) return resolve(result);
+                    bestEffortFallback();
+                });
+            });
+
+        } else if (platform === 'darwin') {
+            const mdfindCmds = variants.map(v => `mdfind -name "${v}" 2>/dev/null`).join(' ; ');
+            exec(`( ${mdfindCmds} ) | head -1`, { timeout: 6000 }, (err, stdout) => {
+                const result = (stdout || '').trim().split('\n')[0].trim();
+                if (result) return resolve(result);
+                bestEffortFallback();
+            });
+
+        } else if (platform === 'win32') {
+            const filters = variants.map(v => `"*${v}*"`).join(',');
+            const cmd = `powershell -NoProfile -Command "` +
+                `@(${filters}) | ForEach-Object { ` +
+                `Get-ChildItem -Path '${searchRoot}' -Recurse -Filter $_ -EA SilentlyContinue | ` +
+                `Select-Object -First 1 -ExpandProperty FullName } | Select-Object -First 1"`;
+            exec(cmd, { timeout: 12000 }, (err, stdout) => {
+                const result = (stdout || '').trim();
+                if (result) return resolve(result);
+                bestEffortFallback();
+            });
+
+        } else {
+            bestEffortFallback();
+        }
+    });
+}
+
+// IPC surface: renderer can ask the main process to find & open a file/folder by name
+ipcMain.handle('find-and-open-file', async (event, name) => {
+    const homeDir = app.getPath('home');
+    console.log(`🔍 find-and-open-file: "${name}"`);
+    const result = await findFileOrFolder(name, homeDir);
+    if (result) {
+        openFileByExtension(result);   // Routes by extension: html→browser, code→vscode, etc.
+        return { opened: path.basename(result), fullPath: result };
+    }
+    return { error: `Could not find "${name}" on this system.` };
+});
 
 ipcMain.handle('generate-research-paper', async (event, topic) => {
     console.log(`📄 Research paper requested for topic: "${topic}"`);
