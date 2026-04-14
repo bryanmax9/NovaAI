@@ -5,7 +5,7 @@ const { spawn, exec } = require('child_process');
 const { generateSpeech } = require('./tts.js');
 const { askGemini } = require('./gemini.js');
 const { transcribeAudio } = require('./stt.js');
-const { startLiveSession, sendAudioChunk, sendTextChunk, endLiveSession, setBrowserOpen } = require('./live.js');
+const { startLiveSession, sendAudioChunk, sendTextChunk, endLiveSession, setBrowserOpen, setStoreAssistantActive } = require('./live.js');
 
 // Terminate Chromium's Autoplay sandbox. We are a desktop app, not a website!
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -77,6 +77,9 @@ ipcMain.on('drag-start', (event, { x, y }) => {
     if (!win) return;
     const bounds = win.getBounds();
     dragOffset = { x: x - bounds.x, y: y - bounds.y };
+    // Pause bounce while user manually drags Nova
+    _bouncePaused = true;
+    if (bounceInterval) { clearInterval(bounceInterval); bounceInterval = null; }
 });
 
 ipcMain.on('drag-move', (event, { x, y }) => {
@@ -90,6 +93,172 @@ ipcMain.on('drag-move', (event, { x, y }) => {
         height: WINDOW_HEIGHT
     });
 });
+
+ipcMain.on('drag-end', () => {
+    dragOffset = null;
+    // Resume bounce from new position if bounce was active before drag
+    if (_bounceActive && _bouncePaused) {
+        _bouncePaused = false;
+        _startWanderInterval();
+    }
+});
+
+// ── Expressive Movement Engine ────────────────────────────────────────────
+// Nova wanders organically while in conversation, with movement character
+// that reflects emotional state (listening vs speaking vs thinking).
+// When a task starts it eases back to the bottom-right "serious mode" corner.
+
+let bounceInterval = null;
+let _bounceActive = false;
+let _bouncePaused = false;
+let _bouncePos    = { x: 0, y: 0 };
+let _wanderTarget = { x: 0, y: 0 };
+let _wanderTargetTime = 0;
+let _motionMode   = 'listening'; // 'listening' | 'speaking' | 'thinking'
+let _snapInterval = null;
+
+// Per-mode parameters
+// speed    : lerp factor per 30ms tick — keep this low for smooth, organic motion
+// changeMs : how often a new wander target is chosen (longer = lazier movement)
+// Speaking : calmest — Nova barely drifts so it doesn't distract while talking
+// Listening: gentle unhurried float — present but relaxed
+// Thinking : slightly more active than listening — a subtle restlessness
+const MOTION_PARAMS = {
+    speaking:  { speed: 0.012, changeMs: 5000 },
+    listening: { speed: 0.018, changeMs: 3500 },
+    thinking:  { speed: 0.022, changeMs: 2200 },
+};
+
+function _getHomePosition() {
+    const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+    return { x: width - WINDOW_WIDTH, y: height - WINDOW_HEIGHT };
+}
+
+// Pick a random wander target in the "conversation zone" (upper-center area).
+// Nova drifts away from its home corner while chatting, but stays calm.
+function _pickWanderTarget(screenW, screenH, mode) {
+    const margin = 20;
+    let maxX, maxY;
+    if (mode === 'speaking') {
+        // Speaking: smallest range — Nova holds its position while talking
+        maxX = screenW * 0.42;
+        maxY = screenH * 0.38;
+    } else if (mode === 'thinking') {
+        // Thinking: moderate range — a little restless
+        maxX = screenW * 0.55;
+        maxY = screenH * 0.50;
+    } else {
+        // Listening: gentle drift in the upper-center area
+        maxX = screenW * 0.65;
+        maxY = screenH * 0.58;
+    }
+    return {
+        x: margin + Math.random() * (maxX - margin),
+        y: margin + Math.random() * (maxY - margin)
+    };
+}
+
+function _startWanderInterval() {
+    if (bounceInterval) { clearInterval(bounceInterval); bounceInterval = null; }
+    const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+
+    // Seed first target right away
+    _wanderTarget = _pickWanderTarget(width, height, _motionMode);
+    _wanderTargetTime = Date.now();
+
+    bounceInterval = setInterval(() => {
+        if (!mainWindow || !_bounceActive || _bouncePaused) return;
+
+        const params = MOTION_PARAMS[_motionMode] || MOTION_PARAMS.listening;
+        const now = Date.now();
+
+        // Pick a new target once the timer expires
+        if (now - _wanderTargetTime > params.changeMs) {
+            _wanderTarget = _pickWanderTarget(width, height, _motionMode);
+            _wanderTargetTime = now;
+        }
+
+        // Smooth lerp toward target
+        _bouncePos.x += (_wanderTarget.x - _bouncePos.x) * params.speed;
+        _bouncePos.y += (_wanderTarget.y - _bouncePos.y) * params.speed;
+
+        // Clamp to screen
+        _bouncePos.x = Math.max(0, Math.min(width  - WINDOW_WIDTH,  _bouncePos.x));
+        _bouncePos.y = Math.max(0, Math.min(height - WINDOW_HEIGHT, _bouncePos.y));
+
+        mainWindow.setBounds({
+            x: Math.round(_bouncePos.x),
+            y: Math.round(_bouncePos.y),
+            width: WINDOW_WIDTH,
+            height: WINDOW_HEIGHT
+        });
+    }, 30); // ~33 fps
+}
+
+ipcMain.on('nova-bounce-start', () => {
+    if (_bounceActive) return;
+    _bounceActive = true;
+    _bouncePaused = false;
+    _motionMode = 'listening';
+
+    if (_snapInterval) { clearInterval(_snapInterval); _snapInterval = null; }
+    if (!mainWindow) return;
+
+    const bounds = mainWindow.getBounds();
+    _bouncePos = { x: bounds.x, y: bounds.y };
+    _startWanderInterval();
+});
+
+// Renderer sends this while conversation is active to update movement character
+ipcMain.on('nova-move-state', (event, mode) => {
+    if (!_bounceActive) return;
+    if (mode === _motionMode) return; // no change
+
+    _motionMode = mode;
+
+    // When switching to speaking: immediately pick a fresh target so the
+    // movement change is felt right away rather than waiting for the old timer
+    if (mode === 'speaking' || mode === 'thinking') {
+        const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+        _wanderTarget = _pickWanderTarget(width, height, mode);
+        _wanderTargetTime = Date.now();
+    }
+});
+
+function _snapHome() {
+    _bounceActive = false;
+    _bouncePaused = false;
+    if (bounceInterval) { clearInterval(bounceInterval); bounceInterval = null; }
+    if (!mainWindow) return;
+
+    const home = _getHomePosition();
+    const startBounds = mainWindow.getBounds();
+    const startX = startBounds.x;
+    const startY = startBounds.y;
+    let t = 0;
+
+    if (_snapInterval) { clearInterval(_snapInterval); _snapInterval = null; }
+
+    _snapInterval = setInterval(() => {
+        if (!mainWindow) { clearInterval(_snapInterval); _snapInterval = null; return; }
+        t += 0.06;
+        if (t >= 1) {
+            t = 1;
+            clearInterval(_snapInterval);
+            _snapInterval = null;
+        }
+        // Ease-out cubic — purposeful, decisive snap to the corner
+        const ease = 1 - Math.pow(1 - t, 3);
+        mainWindow.setBounds({
+            x: Math.round(startX + (home.x - startX) * ease),
+            y: Math.round(startY + (home.y - startY) * ease),
+            width: WINDOW_WIDTH,
+            height: WINDOW_HEIGHT
+        });
+    }, 16); // ~60 fps
+}
+
+ipcMain.on('nova-bounce-stop', () => _snapHome());
 
 let chatWin = null;
 function createChatWindow() {
@@ -131,9 +300,93 @@ ipcMain.on('browser-ready', () => {
     }
 });
 
+// ── Store Detection ───────────────────────────────────────────────────────
+// Ordered list of known shopping destinations. First match wins.
+const STORE_PATTERNS = [
+    { re: /apple\.com/i,                        name: 'Apple' },
+    { re: /amazon\.(com|co\.uk|de|fr|ca|es|it|co\.jp)/i, name: 'Amazon' },
+    { re: /ebay\.(com|co\.uk|de|fr|ca)/i,       name: 'eBay' },
+    { re: /bestbuy\.com/i,                       name: 'Best Buy' },
+    { re: /pokemoncenter\.com/i,                 name: 'Pokémon Center' },
+    { re: /shop\.pokemon\.com/i,                 name: 'Pokémon Center' },
+    { re: /shop\.leagueoflegends\.com/i,         name: 'League of Legends' },
+    { re: /merch\.riotgames\.com/i,              name: 'Riot Games' },
+    { re: /shop\.riotgames\.com/i,               name: 'Riot Games' },
+    { re: /target\.com/i,                        name: 'Target' },
+    { re: /walmart\.com/i,                       name: 'Walmart' },
+    { re: /newegg\.com/i,                        name: 'Newegg' },
+    { re: /etsy\.com/i,                          name: 'Etsy' },
+    { re: /nike\.com/i,                          name: 'Nike' },
+    { re: /adidas\.com/i,                        name: 'Adidas' },
+    { re: /samsung\.com/i,                       name: 'Samsung' },
+    { re: /store\.google\.com/i,                 name: 'Google Store' },
+    { re: /microsoft\.com\/(en-us\/)?store/i,    name: 'Microsoft Store' },
+    { re: /gamestop\.com/i,                      name: 'GameStop' },
+    { re: /homedepot\.com/i,                     name: 'Home Depot' },
+    { re: /costco\.com/i,                        name: 'Costco' },
+    { re: /wayfair\.com/i,                       name: 'Wayfair' },
+    { re: /ikea\.com/i,                          name: 'IKEA' },
+    { re: /lego\.com/i,                          name: 'LEGO' },
+    { re: /thinkgeek\.com/i,                     name: 'ThinkGeek' },
+    { re: /funko\.com/i,                         name: 'Funko' },
+    { re: /hot-topic\.com/i,                     name: 'Hot Topic' },
+    { re: /zavvi\.com/i,                         name: 'Zavvi' },
+    { re: /sephora\.com/i,                       name: 'Sephora' },
+    { re: /ulta\.com/i,                          name: 'Ulta Beauty' },
+];
+
+// Fallback: if the URL or title strongly suggests a store but doesn't match above
+const STORE_HEURISTIC = /\/shop\b|\/store\b|\/buy\b|\/products?\b|\/collections?\b|shopping\.|storefront/i;
+
+function detectStore(url, title) {
+    for (const { re, name } of STORE_PATTERNS) {
+        if (re.test(url)) return name;
+    }
+    // Heuristic: URL or title looks like a store
+    if (STORE_HEURISTIC.test(url)) {
+        // Try to derive store name from hostname
+        try {
+            const host = new URL(url).hostname.replace(/^www\./, '');
+            const domain = host.split('.')[0];
+            const storeName = domain.charAt(0).toUpperCase() + domain.slice(1);
+            return storeName;
+        } catch (_) {}
+    }
+    return null;
+}
+
+// Deduplicate by store NAME, not URL.
+// apple.com, apple.com/watch, apple.com/shop/buy-watch are all the same store.
+// Only re-announce when the user leaves Apple and lands on Amazon, etc.
+let _lastStoreDetectedName = '';
+ipcMain.on('browser-page-loaded', (event, { url, title }) => {
+    if (!url) return;
+
+    const storeName = detectStore(url, title);
+    if (!storeName) {
+        // User navigated away from a known store — reset so re-entry fires again
+        _lastStoreDetectedName = '';
+        setStoreAssistantActive(false);
+        return;
+    }
+
+    // Always keep live.js informed that we're on a store (for smart_click follow-up)
+    setStoreAssistantActive(true);
+
+    // Same store as before (any sub-page) — do not re-announce greeting
+    if (storeName === _lastStoreDetectedName) return;
+
+    _lastStoreDetectedName = storeName;
+    console.log(`🛍️ Store detected: ${storeName} — ${url}`);
+    if (mainWindow) {
+        mainWindow.webContents.send('store-detected', { storeName, url });
+    }
+});
+
 function openBrowser(data) {
     if (!data) return;
     console.log('🌍 Opening Browser Agent with:', data);
+    _snapHome(); // Browser opening = serious mode, snap back to corner
 
     if (!browserWin) {
         createBrowserWindow();
@@ -203,6 +456,7 @@ function closeBrowser() {
         browserWin = null;
     }
     setBrowserOpen(false);
+    _lastStoreDetectedName = ''; // reset so re-entering same store fires greeting again
 }
 
 function getDomMap() {

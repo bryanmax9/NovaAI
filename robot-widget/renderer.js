@@ -48,6 +48,9 @@ window.addEventListener('mousemove', (e) => {
 });
 
 window.addEventListener('mouseup', () => {
+    if (isDragging) {
+        ipcRenderer.send('drag-end');
+    }
     isDragging = false;
 });
 
@@ -77,6 +80,49 @@ setInterval(() => {
         setOrbState(null);
     }
 }, 100);
+
+// ── Expressive Movement Control ────────────────────────────────────────────
+// Conversation mode → Nova wanders expressively, movement character driven by
+// emotional state (listening / speaking / thinking).
+// Task mode → Nova snaps back to bottom-right corner (focused / serious).
+let _prevNovaBounceState = null;
+let _prevNovaMoveMode    = null;
+setInterval(() => {
+    // Active wander only when in pure conversation — no task running
+    const shouldWander = window.novaState.isAwake &&
+        !window.novaState.isProcessingCommand &&
+        !window.novaState.isResearching &&
+        !window.novaState.isAwaitingPlatform &&
+        window.novaState.pendingChoices.length === 0;
+
+    if (shouldWander !== _prevNovaBounceState) {
+        _prevNovaBounceState = shouldWander;
+        if (shouldWander) {
+            ipcRenderer.send('nova-bounce-start');
+        } else {
+            ipcRenderer.send('nova-bounce-stop');
+        }
+    }
+
+    // While wandering, keep main.js updated on the emotional state so it can
+    // adjust movement character in real-time (no need to restart the interval)
+    if (shouldWander) {
+        let mode;
+        if (window.novaState.isSpeaking) {
+            mode = 'speaking';   // Nova is talking — animated, expressive
+        } else if (window.novaState.isProcessingCommand || window.novaState.isResearching) {
+            mode = 'thinking';   // Brief thinking moment before a task locks in
+        } else {
+            mode = 'listening';  // Nova is waiting / listening — gentle drift
+        }
+        if (mode !== _prevNovaMoveMode) {
+            _prevNovaMoveMode = mode;
+            ipcRenderer.send('nova-move-state', mode);
+        }
+    } else {
+        _prevNovaMoveMode = null; // Reset so next conversation starts fresh
+    }
+}, 150);
 
 window.onerror = function (msg, url, line, col, error) {
     console.error("Window Error: ", msg, url, line, col, error);
@@ -615,6 +661,18 @@ async function initOfflineVoice() {
             // Notify backend wrapper to open ai.live.connect WebSockets!
             ipcRenderer.send('live-start');
 
+            // Deliver any pending store greeting (queued while Nova was asleep)
+            if (window._pendingStoreGreeting) {
+                const greet = window._pendingStoreGreeting;
+                window._pendingStoreGreeting = null;
+                // Short delay so the live session has time to fully connect first
+                setTimeout(() => {
+                    if (window.novaState.isAwake) {
+                        ipcRenderer.send('live-text-chunk', greet);
+                    }
+                }, 2000);
+            }
+
             clearTimeout(sleepTimer);
             sleepTimer = setTimeout(() => {
                 window.novaState.isAwake = false;
@@ -964,6 +1022,25 @@ async function initOfflineVoice() {
             ipcRenderer.send('browser-close');
         });
 
+        // ── STORE DETECTION ───────────────────────────────────────────────────
+        // When main.js detects the browser navigated to a known store, inject
+        // a greeting prompt into the live session (or queue it for next wake-up).
+        window._pendingStoreGreeting = null;
+        ipcRenderer.on('store-detected', (event, { storeName }) => {
+            console.log('🛒 Store detected:', storeName);
+            const msg =
+                `[STORE DETECTED - SYSTEM NOTIFICATION] The user's browser just navigated to ${storeName}. ` +
+                `CRITICAL INSTRUCTIONS: Do NOT call any tools. Do NOT call get_browser_state. Do NOT call control_browser. ` +
+                `Just speak out loud right now — greet the user warmly and ask what they are looking to find or buy on ${storeName}. ` +
+                `Example: "Oh nice, we're on ${storeName}! What are you looking for today? I can help you find the right product and tell you about the different options and prices." ` +
+                `After the user replies with what they want, THEN you may use tools to navigate.`;
+            if (window.novaState.isAwake) {
+                ipcRenderer.send('live-text-chunk', msg);
+            } else {
+                window._pendingStoreGreeting = msg;
+            }
+        });
+
         let streamingTextBuffer = "";
         ipcRenderer.on('live-text-chunk', (event, text) => {
             streamingTextBuffer += text;
@@ -1049,11 +1126,19 @@ setTimeout(async () => {
         const audio = new Audio();
         audio.addEventListener('loadeddata', () => {
             audio.play()
-                .then(() => console.log('[Nova Startup] Intro playing.'))
+                .then(() => {
+                    console.log('[Nova Startup] Intro playing.');
+                    // Power-on: remove offline state so orb comes alive with its full colors
+                    if (novaWidget) novaWidget.classList.remove('offline');
+                })
                 .catch(err => console.error('[Nova Startup] play() failed:', err));
         });
         audio.addEventListener('ended',  () => console.log('[Nova Startup] Intro finished.'));
-        audio.addEventListener('error',  (e) => console.error('[Nova Startup] Audio error:', e.target?.error?.code));
+        audio.addEventListener('error',  (e) => {
+            console.error('[Nova Startup] Audio error:', e.target?.error?.code);
+            // Still power-on even if audio fails so the UI isn't stuck offline
+            if (novaWidget) novaWidget.classList.remove('offline');
+        });
         audio.src = `appassets:///${audioPath}`;
         audio.load();
     } catch (err) {

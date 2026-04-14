@@ -27,6 +27,14 @@
       display: flex;
       align-items: center;
       justify-content: center;
+      /* Smooth power-up when offline class is removed */
+      transition: filter 1.6s ease, opacity 1.6s ease;
+    }
+
+    /* ── OFFLINE / BOOT state — dark grey, dormant ── */
+    #widget.offline {
+      filter: grayscale(1) brightness(0.12);
+      opacity: 0.7;
     }
 
     /* ── Thin spinning arc (conic-gradient + mask = ring-slice) ── */
@@ -217,7 +225,7 @@
   </style>
 </head>
 <body>
-  <div id="widget">
+  <div id="widget" class="offline">
     <div id="arc"></div>
     <div id="arc2"></div>
     <div id="ring"></div>

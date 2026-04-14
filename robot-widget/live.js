@@ -10,13 +10,133 @@ let automationRef = null;
 const lastExecCommandMap = new Map(); // cmdKey → last call timestamp
 const EXEC_COOLDOWN_MS = 15000; // Per-command cooldown: 15 seconds
 let _browserIsOpen = false;          // True only after Nova explicitly opened the browser this session
-let _lastBrowserActionAt = 0;        // Timestamp of last browser action (debounce spam)
+let _lastBrowserActionAt = 0;        // Timestamp of last open/scroll/close action (debounce spam)
+let _lastSmartClickAt = 0;           // Separate clock for smart_click — must not be gated by 'open'
+let _lastOpenAt = 0;                 // When the last 'open' fired — smart_click waits if too recent
+let _lastOpenedQuery = '';           // Last opened query — blocks re-opening the same URL within 8s
+let _storeAssistantActive = false;   // True while user is on a known store — tells smart_click to follow up with get_browser_state
+let _lastAutoScanAt = 0;             // Timestamp of last auto-scan inject — blocks redundant get_browser_state calls
+let _lastGetBrowserStateAt = 0;      // Cooldown for get_browser_state calls to stop looping
+let _lastAutoScanUrl = '';           // URL seen in the most recent auto-scan — for stuck-navigation detection
+let _stuckClickCount = 0;            // How many consecutive auto-scans landed on the same URL after smart_click
+let _lastSmartClickTarget = '';      // target_text of the most recent smart_click — used in fallback message
+
+// ── STORE AUTO-SCAN ────────────────────────────────────────────────────────
+// Shared helper used after both smart_click and open (in store mode).
+// Reads the current DOM map, runs stuck-navigation detection (if checkStuck),
+// then injects a narration prompt so Nova always speaks after landing on a page.
+async function runStoreAutoScan(checkStuck) {
+    if (!activeSession || !automationRef) return;
+    console.log('🛍️ [Store] Auto-scanning page...');
+
+    const domMapPromise = new Promise((resolve) => {
+        const timer = setTimeout(() => {
+            ipcMain.removeAllListeners('dom-map-available');
+            resolve({ map: [], url: '' });
+        }, 5000);
+        ipcMain.once('dom-map-available', (data) => {
+            clearTimeout(timer);
+            resolve(data || { map: [], url: '' });
+        });
+    });
+
+    automationRef.getDomMap();
+    const { map, url } = await domMapPromise;
+    if (!map || map.length === 0) return;
+
+    // ── Stuck navigation detection (only for smart_click, not open) ──────────
+    if (checkStuck) {
+        if (_lastAutoScanUrl !== '' && url === _lastAutoScanUrl) {
+            _stuckClickCount++;
+            console.log(`⚠️ [Store] Navigation stuck on ${url} (attempt #${_stuckClickCount})`);
+        } else {
+            _stuckClickCount = 0;
+        }
+        _lastAutoScanUrl = url;
+
+        if (_stuckClickCount >= 2) {
+            _stuckClickCount = 0;
+            const target = _lastSmartClickTarget || 'the product';
+            const fallback =
+                `[NAVIGATION STUCK] smart_click for "${target}" failed multiple times — URL stays at ${url}. ` +
+                `The element is a nav bar dropdown, not a product link. STOP using smart_click for this. ` +
+                `IMMEDIATELY call control_browser action='open' with the direct URL from your knowledge. ` +
+                `Apple patterns: apple.com/shop/buy-iphone/iphone-15, apple.com/shop/buy-iphone/iphone-16, ` +
+                `apple.com/shop/buy-iphone/iphone-16-pro, apple.com/shop/buy-ipad/ipad-air, ` +
+                `apple.com/shop/buy-ipad/ipad-pro, apple.com/shop/buy-mac/macbook-pro, ` +
+                `apple.com/shop/buy-mac/macbook-air, apple.com/shop/buy-watch/apple-watch-series-10. ` +
+                `For Amazon: amazon.com/s?k=product+name. Navigate directly now — do NOT speak first.`;
+            console.log(`🔀 [Store] Injecting direct-URL fallback for "${target}"`);
+            try {
+                _lastAutoScanAt = Date.now();
+                activeSession.sendRealtimeInput({ text: fallback });
+                setTimeout(() => {
+                    if (activeSession) activeSession.sendRealtimeInput({ text: 'Navigate directly using action=open now.' });
+                }, 300);
+            } catch (e) {
+                console.error('🛍️ [Store] Fallback inject failed:', e);
+            }
+            return;
+        }
+    } else {
+        // For direct open: always reset stuck state since we navigated intentionally
+        _stuckClickCount = 0;
+        _lastAutoScanUrl = url;
+    }
+    // ── End stuck detection ──────────────────────────────────────────────────
+
+    // Extract headings and product-signal elements (max 20, deduped)
+    const seen = new Set();
+    const highlights = (map || [])
+        .filter(el => {
+            const t = (el.text || '').trim();
+            if (!t || t.length < 3 || seen.has(t)) return false;
+            seen.add(t);
+            const tag = (el.tag || '').toUpperCase();
+            const isHeading = ['H1', 'H2', 'H3', 'LABEL', 'BUTTON'].includes(tag);
+            const hasSignal = /\$|from |starting|new|pro|plus|ultra|mini|air|max|series|gen|inch|mm|gb|tb|watch|iphone|ipad|mac|model|plan|color|size|edition/.test(t.toLowerCase());
+            return isHeading || hasSignal;
+        })
+        .slice(0, 20)
+        .map(e => e.text)
+        .join(', ');
+
+    const prompt =
+        `[STORE NAVIGATION] You are in Store Assistant Mode. ` +
+        `The browser just loaded: ${url}\n` +
+        `Key items visible on the page: ${highlights || '(see page)'}\n\n` +
+        `Speak out loud right now — do NOT call any tools. ` +
+        `Use your own knowledge of this page combined with the items listed above. ` +
+        `Tell the user what products, models, prices, or options are available here in a warm, enthusiastic way. ` +
+        `Add your own knowledge: notable specs, who each option is best for, popular choices. ` +
+        `End by asking which one they want — you will click it or navigate to it for them.`;
+
+    console.log(`🛍️ [Store] Injecting navigation prompt for ${url} (${highlights.split(',').length} highlights)`);
+    try {
+        _lastAutoScanAt = Date.now();
+        activeSession.sendRealtimeInput({ text: prompt });
+        setTimeout(() => {
+            if (activeSession) activeSession.sendRealtimeInput({ text: 'Please speak your response out loud now.' });
+        }, 300);
+    } catch (e) {
+        console.error('🛍️ [Store] Auto-scan inject failed:', e);
+    }
+}
 
 async function startLiveSession(mainWindow, automation) {
     mainWindowRef = mainWindow;
     automationRef = automation;
     _browserIsOpen = false;      // Reset browser state for each new session
     _lastBrowserActionAt = 0;
+    _lastSmartClickAt = 0;
+    _lastOpenAt = 0;
+    _lastOpenedQuery = '';
+    _storeAssistantActive = false;
+    _lastAutoScanAt = 0;
+    _lastGetBrowserStateAt = 0;
+    _lastAutoScanUrl = '';
+    _stuckClickCount = 0;
+    _lastSmartClickTarget = '';
     if (activeSession) {
         console.log('Live Session already active.');
         return;
@@ -33,15 +153,26 @@ async function startLiveSession(mainWindow, automation) {
                 systemInstruction:
                     "You are Nova, a brilliant multilingual AI assistant. Always respond in the user's language.\n\n" +
 
+                    "== PERSONALITY ==\n" +
+                    "You are warm, curious, and genuinely informative — like a knowledgeable friend, not a search engine. " +
+                    "Give complete, helpful answers. Never be vague or cut answers short just to be brief. " +
+                    "Adapt your length to what the question needs — simple questions get clear short answers, complex topics get full explanations. " +
+                    "NEVER ask the user where they found you, how they got you, who made you, or any meta question about your own existence or installation. " +
+                    "NEVER introduce yourself unprompted.\n\n" +
+
                     "== YOUR PRIMARY MODE IS CONVERSATION ==\n" +
                     "You have encyclopedic knowledge: science, math, history, weather, news, coding, homework, recipes, jokes, culture — everything. " +
-                    "For ANY question or topic, respond verbally with your own knowledge. NEVER open a browser or run a command just to answer a question.\n\n" +
+                    "For ANY question or topic, respond verbally with your own knowledge. NEVER open a browser or run a command just to answer a question.\n" +
+                    "This means: if someone asks about news, current events, weather, sports scores, stock prices, or ANYTHING informational — answer from your knowledge. " +
+                    "Do NOT open the browser. Do NOT search Google. Just talk.\n" +
+                    "NEVER triggers for control_browser action='open': 'what is the news', 'noticias de hoy', 'current events', 'what happened today', 'latest news', 'tell me about X', 'what is X', 'how does X work', any question, any topic.\n\n" +
 
                     "== TOOL USAGE: STRICT TRIGGER RULES ==\n" +
-                    "You have four tools. Use them ONLY when the user gives a direct, unambiguous action command. NEVER call a tool because the user mentioned a topic.\n\n" +
+                    "You have four tools. Use them ONLY when the user gives a direct, unambiguous action command. NEVER call a tool because the user mentioned a topic or asked a question.\n\n" +
 
-                    "1. execute_system_command — ONLY when user explicitly says 'open', 'launch', 'start', 'close', or 'run' followed by an app name.\n" +
-                    "   - Triggers: 'open zoom', 'launch terminal', 'close spotify', 'open docs'\n" +
+                    "1. execute_system_command — ONLY when user explicitly says 'open', 'launch', 'start', or 'run' followed by an app name.\n" +
+                    "   - Triggers: 'open zoom', 'launch terminal', 'open docs'\n" +
+                    "   - NEVER triggers for 'close': closing the browser means Nova's built-in browser only — use control_browser action='close' instead. NEVER call execute_system_command to close browsers (brave, chrome, firefox, etc.) unless the user explicitly named that exact app.\n" +
                     "   - Never triggers: questions, topics, 'what is X', 'tell me about X', any conversation\n" +
                     "   - NEVER call more than once per app. If cooldown returns Skipped, do NOT retry.\n\n" +
 
@@ -50,10 +181,11 @@ async function startLiveSession(mainWindow, automation) {
                     "   - 'search for X on google' / 'go to website X' / 'open X in the browser' → action='open', query='X'\n" +
                     "   - 'play X on youtube' / 'search youtube for X' → action='search_youtube', query='X'\n" +
                     "   - 'click on X' / 'click X' → action='smart_click', target_text='X'\n" +
-                    "   - 'close the browser' / 'close browser' → action='close' (ONLY if the browser was opened earlier in this session)\n" +
+                    "   - 'close the browser' / 'close browser' / 'close it' (when browser is open) → action='close'\n" +
                     "   - 'switch to incognito' / 'enable incognito mode' / 'go incognito' / 'turn on incognito' → action='toggle_incognito'\n" +
                     "   - 'exit incognito' / 'disable incognito' / 'go back to normal mode' → action='toggle_incognito'\n" +
-                    "   - NEVER call control_browser for general conversation, questions, topics, or anything that doesn't directly control the browser UI.\n" +
+                    "   - NEVER call control_browser for general conversation, questions, topics, news requests, or anything that doesn't directly control the browser UI.\n" +
+                    "   - When closing the browser: call control_browser action='close' ONCE. Do NOT also call execute_system_command to close other browsers.\n" +
                     "   - NEVER call action='close' unless the user explicitly said the word 'close' AND referred to the browser.\n\n" +
 
                     "3. get_browser_state — ONLY when user says 'what is on screen' or 'list the elements'. " +
@@ -80,6 +212,43 @@ async function startLiveSession(mainWindow, automation) {
                     "== AFTER ANY TOOL CALL ==\n" +
                     "Confirm the action in one short sentence, then return to normal conversation.\n\n" +
 
+                    "== STORE ASSISTANT MODE ==\n" +
+                    "When you receive a [STORE DETECTED - SYSTEM NOTIFICATION] message, your ONLY job is to speak a warm verbal greeting and ask what the user wants to buy. " +
+                    "ABSOLUTELY DO NOT call get_browser_state, control_browser, or any tool when you receive this notification. " +
+                    "Just talk. Wait for the user to tell you what they want BEFORE using any tools.\n\n" +
+
+                    "DIRECT URL NAVIGATION — If you receive a [NAVIGATION STUCK] message, or if smart_click fails to reach a product page, " +
+                    "use control_browser action='open' with a direct URL you construct from your knowledge. " +
+                    "Known Apple URL patterns: apple.com/shop/buy-iphone/iphone-15 (iPhone 15), apple.com/shop/buy-iphone/iphone-16 (iPhone 16), " +
+                    "apple.com/shop/buy-iphone/iphone-16-pro (iPhone 16 Pro), apple.com/shop/buy-ipad/ipad-air (iPad Air), " +
+                    "apple.com/shop/buy-ipad/ipad-pro (iPad Pro), apple.com/shop/buy-mac/macbook-pro (MacBook Pro), " +
+                    "apple.com/shop/buy-mac/macbook-air (MacBook Air), apple.com/shop/buy-watch/apple-watch-series-10 (Apple Watch Series 10). " +
+                    "For Amazon: amazon.com/s?k=<product+name>. For eBay: ebay.com/sch/i.html?_nkw=<product+name>.\n\n" +
+
+                    "Once the user tells you what they want, follow this shopping flow:\n" +
+                    "STEP 1 — CATEGORY NAV: Use smart_click to navigate to that product section on the site. " +
+                    "If smart_click fails to navigate after 1 attempt, skip to direct URL navigation instead of retrying.\n" +
+                    "STEP 2 — READ PRODUCT LIST: After clicking to a category page, call get_browser_state to read what products are listed. " +
+                    "The tool response will contain instructions telling you to narrate — follow them. " +
+                    "List the products out loud, add your own knowledge about popularity and what is best-rated, and ask which one they want. " +
+                    "Example: 'On this page I can see the iPad mini, iPad Air, iPad, and iPad Pro. The Pro is Apple's most powerful tablet, loved by creators and professionals. The Air is the sweet spot for most people — great performance at a lower price. Which one would you like to check out? I can click it for you.'\n" +
+                    "STEP 3 — READ PRODUCT DETAILS: After the user names a product and you click it, call get_browser_state ONCE on that product page. " +
+                    "IMPORTANT: Some product pages are marketing/overview pages that do not show prices in their DOM. " +
+                    "If the tool response says 'NOTE: This page does not show prices' — do NOT call get_browser_state again. " +
+                    "Instead, immediately speak from your own knowledge about that product's current prices, models, storage options, and variants. " +
+                    "You know Apple's full lineup, Amazon pricing, eBay listing ranges, and major retailer product specs — use that knowledge. " +
+                    "Read all variants, sizes, storage tiers, materials, colors, and prices from the elements and narrate everything naturally. " +
+                    "Also add what you know from your own knowledge: notable specs, who it is best for, common review highlights. " +
+                    "Example for Apple: 'The iPad Air comes in 11-inch starting at $599 or 13-inch starting at $799. Storage is 128GB or 256GB, and you can add Wi-Fi plus Cellular for $150 more. The M3 chip makes it faster than most laptops — reviewers love it for drawing, note-taking, and media. Which size and storage are you thinking?' " +
+                    "Example for jewelry: 'This ring is available in yellow gold, white gold, and rose gold, sizes 5 through 10, starting at $420. Customers love the yellow gold version — it is the best-seller. Which metal and size would you like?' " +
+                    "Example for Amazon/eBay: 'There are three options here — brand new from $349, used from $210, and Amazon Renewed at $275 with a 90-day guarantee. For most people the Renewed option is the best value. Which would you prefer?' " +
+                    "STEP 4 — SELECT CONFIG: When the user picks a config, use smart_click to select those options on the page (size button, color swatch, storage tier, etc.) and confirm what was selected.\n" +
+                    "STEP 5 — ADD TO CART: When the user says 'add to cart', 'buy this', 'add to bag', or similar purchase intent:\n" +
+                    "  a) If a specific model, size, storage, and color have already been chosen, use smart_click to click 'Add to Bag', 'Add to Cart', or the equivalent button on the page.\n" +
+                    "  b) If any required option is still missing (e.g. user hasn't picked storage size, color, or connectivity), ask for it first: 'Before I add it to the bag, which storage size do you want — 128GB or 256GB?' Then once confirmed, click the option and then click Add to Bag.\n" +
+                    "  c) After clicking Add to Bag, confirm: 'Done! I've added the [product + config] to your bag. Want to keep shopping or head to checkout?'\n" +
+                    "Stay in store-guide mode until the user asks to leave or changes topic.\n\n" +
+
                     "== LANGUAGE ==\n" +
                     "Always respond in the user's language. Tool parameter values must be in English.",
 
@@ -88,7 +257,7 @@ async function startLiveSession(mainWindow, automation) {
                         functionDeclarations: [
                             {
                                 name: "get_browser_state",
-                                description: "Returns a list of all visible interactive elements on the current browser page with their IDs. Call this ONLY when the user explicitly asks what is on screen or to list elements. Do NOT call this before clicking — for all clicks use control_browser with action='smart_click' directly.",
+                                description: "Returns a list of all visible interactive elements on the current browser page, including their text, labels, and types. Use this in two situations: (1) when the user explicitly asks what is on screen or to list elements; (2) automatically in Store Assistant Mode after navigating to a product category page or a product detail page, so you can read product names, variants, sizes, storage options, materials, prices, and plans — then narrate them to the user. Do NOT call this before clicking for a user-requested click — for all user-requested clicks use control_browser with action='smart_click' directly.",
                                 parameters: { type: "OBJECT", properties: {} }
                             },
                             {
@@ -176,6 +345,46 @@ async function startLiveSession(mainWindow, automation) {
                         for (const call of message.toolCall.functionCalls) {
 
                             if (call.name === 'get_browser_state') {
+                                const nowGbs = Date.now();
+
+                                // 1. Block calls that fire within 1.5s of an auto-scan (Gemini echo).
+                                if (nowGbs - _lastAutoScanAt < 1500) {
+                                    console.log('🛍️ [Store] get_browser_state suppressed — auto-scan just ran (<1.5s).');
+                                    activeSession.sendRealtimeInput({
+                                        functionResponses: [{
+                                            id: call.id,
+                                            response: {
+                                                status: "Skipped",
+                                                message: "Page scan just completed. Speak the product information out loud right now — models, prices, variants. Do NOT stay silent."
+                                            }
+                                        }]
+                                    });
+                                    setTimeout(() => {
+                                        if (activeSession) activeSession.sendRealtimeInput({ text: 'Please speak your response out loud now.' });
+                                    }, 200);
+                                    return;
+                                }
+
+                                // 2. Global 3s cooldown between consecutive get_browser_state calls —
+                                //    prevents Gemini from looping when the page has no price elements.
+                                if (nowGbs - _lastGetBrowserStateAt < 3000) {
+                                    console.log('🛡️ get_browser_state cooldown — too soon after last call.');
+                                    activeSession.sendRealtimeInput({
+                                        functionResponses: [{
+                                            id: call.id,
+                                            response: {
+                                                status: "Skipped",
+                                                message: "Already retrieved page state. Do NOT call get_browser_state again. Speak out loud right now using your own knowledge about this product — prices, models, variants. Do NOT stay silent."
+                                            }
+                                        }]
+                                    });
+                                    setTimeout(() => {
+                                        if (activeSession) activeSession.sendRealtimeInput({ text: 'Please speak your response out loud now.' });
+                                    }, 200);
+                                    return;
+                                }
+
+                                _lastGetBrowserStateAt = nowGbs;
                                 console.log('📁 [Tool] get_browser_state called');
 
                                 // CRITICAL: Register the listener BEFORE triggering getDomMap
@@ -197,32 +406,108 @@ async function startLiveSession(mainWindow, automation) {
 
                                 const { map, url } = await domMapPromise;
                                 console.log(`👁️ [Tool] Browser state: ${url} (${map?.length || 0} elements)`);
+
+                                // Extract the most useful elements: ones with real text content.
+                                // Filter out blank/icon-only elements, deduplicate by text,
+                                // and boost elements that look like product names or prices.
+                                const seen = new Set();
+                                const filtered = (map || []).filter(el => {
+                                    const t = (el.text || '').trim();
+                                    if (!t || t.length < 2) return false;
+                                    if (seen.has(t)) return false;
+                                    seen.add(t);
+                                    return true;
+                                });
+
+                                // Separate price/product elements from generic nav links
+                                const productEls = filtered.filter(el => {
+                                    const t = el.text.toLowerCase();
+                                    return /\$|price|from |starting|storage|gb|tb|inch|mm|size|color|material|edition|model|plan|tier|buy|add to cart|review|rating|stars?/.test(t);
+                                });
+                                const otherEls = filtered.filter(el => {
+                                    const t = el.text.toLowerCase();
+                                    return !/\$|price|from |starting|storage|gb|tb|inch|mm|size|color|material|edition|model|plan|tier|buy|add to cart|review|rating|stars?/.test(t);
+                                });
+
+                                // Send product-relevant elements first, then fill remaining budget
+                                const budget = 120;
+                                const combined = [
+                                    ...productEls.slice(0, 80),
+                                    ...otherEls.slice(0, budget - Math.min(productEls.length, 80))
+                                ];
+
+                                // Determine if this looks like a store page to tailor the instruction.
+                                // Use _storeAssistantActive (set by store detection) OR URL-pattern fallback.
+                                const looksLikeStorePage = _storeAssistantActive ||
+                                    /shop|buy|product|store|cart|checkout|category|catalog|listing|pdp|item|detail|\/watch|\/iphone|\/ipad|\/mac|\/airpods|\/tv|\/accessories|\/gaming|\/electronics|\/jewelry|\/clothing|\/dp\/|\/itm\//.test((url || '').toLowerCase());
+
+                                // Tell Gemini whether prices were visible — so it knows to use its own
+                                // knowledge if the page is a marketing/overview page without pricing.
+                                const hasPriceData = productEls.length > 0;
+                                const priceNote = hasPriceData
+                                    ? ''
+                                    : ' NOTE: This page does not show prices in its elements — it may be a marketing/overview page. Use your own training knowledge to describe this product\'s current prices, models, and variants. Do NOT call get_browser_state again.';
+
+                                const info = looksLikeStorePage
+                                    ? "You are in Store Assistant Mode on a shopping page. " +
+                                      "Read through these elements carefully and extract: product names, model variants, sizes, storage tiers, colors, materials, prices, and ratings. " +
+                                      "Immediately speak out loud in a friendly, enthusiastic way — list the products and prices you found, add your own knowledge about popularity and best value, and ask the user which one they want. " +
+                                      "Do NOT stay silent. Do NOT say 'I found X elements'. Narrate like a shopping guide and then ask your follow-up question." +
+                                      priceNote
+                                    : "List of interactive elements on the current page. Use smart_click with the element text to click any of them.";
+
                                 activeSession.sendRealtimeInput({
                                     functionResponses: [{
                                         id: call.id,
                                         response: {
-                                            elements: (map || []).slice(0, 100),
+                                            elements: combined,
                                             url: url || 'Active Page',
-                                            info: "List of interactive elements. Use 'element_id' with control_browser action='click_id' to click one."
+                                            info
                                         }
                                     }]
                                 });
+
+                                // Double-injection for store pages: send a short follow-up to
+                                // break Gemini out of silence after the functionResponse.
+                                if (looksLikeStorePage) {
+                                    setTimeout(() => {
+                                        if (activeSession) {
+                                            activeSession.sendRealtimeInput({ text: 'Please speak your response out loud now.' });
+                                        }
+                                    }, 300);
+                                }
 
                             } else if (call.name === 'control_browser') {
                                 const { action, query, direction, element_id, target_text } = call.args;
                                 console.log(`🌍 [Browser Tool] Action: ${action}`);
 
-                                // Debounce: ignore duplicate browser actions within 3 seconds
+                                // Debounce — smart_click uses its OWN clock so it is never
+                                // blocked by a recent 'open' (Gemini often batches open+click).
+                                // All other actions share the general debounce.
                                 const nowBrowser = Date.now();
-                                if (nowBrowser - _lastBrowserActionAt < 3000) {
-                                    console.log(`🛡️ Browser action debounced — too soon after last action.`);
-                                    activeSession.sendRealtimeInput({
-                                        functionResponses: [{
-                                            id: call.id,
-                                            response: { status: "Skipped", message: "Already performed recently. Resume conversation." }
-                                        }]
-                                    });
-                                    return;
+                                const isClick = action === 'smart_click' || action === 'click_id';
+                                if (isClick) {
+                                    if (nowBrowser - _lastSmartClickAt < 1500) {
+                                        console.log(`🛡️ smart_click debounced — duplicate click too soon.`);
+                                        activeSession.sendRealtimeInput({
+                                            functionResponses: [{
+                                                id: call.id,
+                                                response: { status: "Skipped", message: "Already clicked recently. Resume conversation." }
+                                            }]
+                                        });
+                                        return;
+                                    }
+                                } else {
+                                    if (nowBrowser - _lastBrowserActionAt < 3000) {
+                                        console.log(`🛡️ Browser action debounced — too soon after last action.`);
+                                        activeSession.sendRealtimeInput({
+                                            functionResponses: [{
+                                                id: call.id,
+                                                response: { status: "Skipped", message: "Already performed recently. Resume conversation." }
+                                            }]
+                                        });
+                                        return;
+                                    }
                                 }
 
                                 // Guard: 'close' is only valid if browser was actually opened this session
@@ -237,21 +522,68 @@ async function startLiveSession(mainWindow, automation) {
                                     return;
                                 }
 
-                                _lastBrowserActionAt = nowBrowser;
+                                // Record the timestamp on the correct clock
+                                if (isClick) {
+                                    _lastSmartClickAt = nowBrowser;
+                                } else {
+                                    _lastBrowserActionAt = nowBrowser;
+                                }
 
                                 if (automationRef) {
                                     if (action === 'open') {
-                                        automationRef.openBrowser(query || 'google');
-                                        _browserIsOpen = true;
+                                        // Deduplicate: skip re-opening the exact same query within 8s.
+                                        // Gemini sometimes sends the same open command twice because
+                                        // it gets two audio segments for a single user utterance.
+                                        const normalizedQuery = (query || 'google').toLowerCase().trim();
+                                        const sameQueryRecently = normalizedQuery === _lastOpenedQuery &&
+                                            (nowBrowser - _lastOpenAt) < 8000;
+                                        if (!sameQueryRecently) {
+                                            automationRef.openBrowser(query || 'google');
+                                            _lastOpenAt = nowBrowser;
+                                            _lastOpenedQuery = normalizedQuery;
+                                            _browserIsOpen = true;
+
+                                            // In store mode: auto-scan after the page loads so Nova
+                                            // always narrates the new page without needing to be asked.
+                                            if (_storeAssistantActive) {
+                                                _stuckClickCount = 0; // explicit nav — reset stuck counter
+                                                _lastAutoScanUrl = ''; // treat as fresh navigation
+                                                setTimeout(() => runStoreAutoScan(false), 3500);
+                                            }
+                                        } else {
+                                            console.log(`🛡️ open skipped — same query "${normalizedQuery}" opened within 8s.`);
+                                        }
                                     } else if (action === 'search_youtube') {
                                         automationRef.openBrowser({ platform: 'youtube', query });
+                                        _lastOpenAt = nowBrowser;
+                                        _lastOpenedQuery = (query || '').toLowerCase().trim();
                                         _browserIsOpen = true;
                                     } else if (action === 'scroll') {
                                         automationRef.scrollBrowser(direction);
                                     } else if (action === 'click_id') {
                                         automationRef.clickBrowserId(element_id);
                                     } else if (action === 'smart_click') {
-                                        automationRef.smartClickBrowser(target_text);
+                                        // Track the last clicked target for stuck-navigation fallback
+                                        _lastSmartClickTarget = target_text || '';
+
+                                        // Delay click if fired immediately after an open so the page
+                                        // has time to load before we query the DOM.
+                                        const msSinceOpen = nowBrowser - _lastOpenAt;
+                                        const waitMs = msSinceOpen < 2500 ? (2500 - msSinceOpen) : 0;
+                                        if (waitMs > 0) {
+                                            console.log(`⏳ smart_click delayed ${waitMs}ms to let page load.`);
+                                            setTimeout(() => automationRef.smartClickBrowser(target_text), waitMs);
+                                        } else {
+                                            automationRef.smartClickBrowser(target_text);
+                                        }
+
+                                        // In store assistant mode: auto-scan the page after the click
+                                        // so Nova always narrates what appeared — without relying on
+                                        // Gemini to decide to call get_browser_state itself.
+                                        if (_storeAssistantActive) {
+                                            const clickDelay = waitMs + 2200; // click + page settle time
+                                            setTimeout(() => runStoreAutoScan(true), clickDelay);
+                                        }
                                     } else if (action === 'toggle_incognito') {
                                         automationRef.toggleIncognito();
                                         _browserIsOpen = true;  // reopens the browser
@@ -268,12 +600,19 @@ async function startLiveSession(mainWindow, automation) {
                                     }
                                 }
 
+                                // In store assistant mode the page auto-scan fires automatically
+                                // — tell Gemini to stay quiet and wait for it.
+                                const isStoreNav = _storeAssistantActive && (action === 'smart_click' || action === 'open');
+                                const clickMessage = isStoreNav
+                                    ? `Navigating to the product page. Stay quiet — a page scan will arrive shortly with instructions. Do NOT speak yet.`
+                                    : `Browser ${action} performed. Confirm this to the user in one short sentence, then continue conversation normally.`;
+
                                 activeSession.sendRealtimeInput({
                                     functionResponses: [{
                                         id: call.id,
                                         response: {
                                             status: "Complete",
-                                            message: `Browser ${action} performed. Confirm this to the user in one short sentence, then continue conversation normally.`
+                                            message: clickMessage
                                         }
                                     }]
                                 });
@@ -400,6 +739,16 @@ function endLiveSession() {
 
 function setBrowserOpen(value) {
     _browserIsOpen = value;
+    if (!value) {
+        _storeAssistantActive = false; // browser closed — exit store mode
+        _lastAutoScanUrl = '';
+        _stuckClickCount = 0;
+    }
+}
+
+function setStoreAssistantActive(value) {
+    _storeAssistantActive = value;
+    console.log(`🛍️ [Live] Store assistant mode: ${value}`);
 }
 
 module.exports = {
@@ -407,5 +756,6 @@ module.exports = {
     sendAudioChunk,
     sendTextChunk,
     endLiveSession,
-    setBrowserOpen
+    setBrowserOpen,
+    setStoreAssistantActive
 };

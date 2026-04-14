@@ -110,6 +110,19 @@
             urlDisplay.innerText = webview.getURL();
         });
 
+        // Report every completed navigation to main so Nova can detect store pages
+        webview.addEventListener('did-finish-load', () => {
+            const url = webview.getURL();
+            if (!url || url === 'about:blank') return;
+            webview.executeJavaScript(`
+                ({ url: location.href, title: document.title })
+            `).then(info => {
+                ipcRenderer.send('browser-page-loaded', info);
+            }).catch(() => {
+                ipcRenderer.send('browser-page-loaded', { url, title: '' });
+            });
+        });
+
         // Send ready signal to main process
         window.addEventListener('DOMContentLoaded', () => {
             ipcRenderer.send('browser-ready');
@@ -141,7 +154,7 @@
             console.log('🧠 Browser: Generating DOM Map...');
             webview.executeJavaScript(`
                 (function() {
-                    const elements = Array.from(document.querySelectorAll('button, a, input, [role="button"], [onclick], h3, .ytp-ad-skip-button, ytd-thumbnail, ytd-video-renderer, img'));
+                    const elements = Array.from(document.querySelectorAll('button, a, input, [role="button"], [onclick], h3, h2, h1, .ytp-ad-skip-button, ytd-thumbnail, ytd-video-renderer, img, [class*="price"], [class*="Price"], [data-testid*="price"], [class*="variant"], [class*="option"], [class*="config"], [class*="storage"], [class*="size"], [class*="model"], [class*="plan"], [class*="tier"], label, [role="radio"], [role="option"], [role="tab"]'));
                     return elements
                         .filter(el => {
                             const rect = el.getBoundingClientRect();
@@ -155,7 +168,7 @@
                             return {
                                 id: index,
                                 tag: el.tagName,
-                                text: (el.innerText || el.ariaLabel || el.placeholder || el.title || "").trim().substring(0, 80),
+                                text: (el.innerText || el.ariaLabel || el.placeholder || el.title || "").trim().substring(0, 120),
                                 type: el.type || el.getAttribute('role') || ""
                             };
                         });
@@ -222,12 +235,31 @@
             console.log('🖱️ Browser: Smart clicking for', targetText);
             const escapedText = JSON.stringify(String(targetText).toLowerCase().trim());
             webview.executeJavaScript(`
-                (function() {
+                (async function() {
+                    // Wait for the page to fully load before querying the DOM.
+                    // This prevents clicking on half-rendered elements when smart_click
+                    // fires immediately after an 'open' command.
+                    if (document.readyState !== 'complete') {
+                        await Promise.race([
+                            new Promise(r => window.addEventListener('load', r, { once: true })),
+                            new Promise(r => setTimeout(r, 4000)) // 4s max wait
+                        ]);
+                    }
+
                     const q = ${escapedText};
                     const words = q.split(/\\s+/).filter(w => w.length > 1);
+
+                    // Only consider elements the user can actually see right now.
+                    // This prevents clicking off-screen suggestions or sidebar cards
+                    // that match the query but are not what the user is looking at.
+                    const inViewport = (r) =>
+                        r.width > 1 && r.height > 1 &&
+                        r.bottom > 0 && r.top < window.innerHeight &&
+                        r.right  > 0 && r.left < window.innerWidth;
+
                     const candidates = Array.from(document.querySelectorAll(
                         'button, a, input, [role="button"], [onclick], h3, nav *, header *, [aria-label], [data-testid], [class*="menu"], [class*="nav"], [class*="toggle"], [class*="hamburger"]'
-                    )).filter(e => { const r=e.getBoundingClientRect(); return r.width>1&&r.height>1; });
+                    )).filter(e => inViewport(e.getBoundingClientRect()));
 
                     const getAttrs = (el) => [
                         el.innerText,
@@ -240,19 +272,30 @@
                         el.getAttribute('data-tooltip'),
                         el.getAttribute('name'),
                         el.id,
-                        el.getAttribute('class')   // getAttribute avoids SVGAnimatedString on SVG nodes
+                        el.getAttribute('class')
                     ].map(v => String(v || '')).join(' ').toLowerCase();
 
                     const score = (el) => {
                         const t = getAttrs(el).trim();
                         if (!t) return 0;
-                        if (t === q) return 100;
-                        if (t.startsWith(q)) return 90;
-                        if (t.includes(q)) return 80;
-                        const matched = words.filter(w => t.includes(w)).length;
-                        if (matched === words.length && words.length > 0) return 70;
-                        if (matched > 0) return matched * 20;
-                        return 0;
+                        let s = 0;
+                        if (t === q) s = 100;
+                        else if (t.startsWith(q)) s = 90;
+                        else if (t.includes(q)) s = 80;
+                        else {
+                            const matched = words.filter(w => t.includes(w)).length;
+                            if (matched === words.length && words.length > 0) s = 70;
+                            else if (matched > 0) s = matched * 20;
+                        }
+                        if (s === 0) return 0;
+                        // Prefer real links and buttons over generic text spans —
+                        // avoids clicking autocomplete/suggestion SPANs that look
+                        // like the target but navigate somewhere unexpected.
+                        const tag = el.tagName.toLowerCase();
+                        if (tag === 'a' && el.href) s += 15;
+                        else if (tag === 'button') s += 10;
+                        else if (tag === 'input') s += 5;
+                        return s;
                     };
 
                     let best = null, bestScore = 0;
@@ -261,12 +304,11 @@
                         if (s > bestScore) { bestScore = s; best = el; }
                     }
 
-                    // Last-resort: if still nothing, search ALL elements for any attribute match
+                    // Last-resort: viewport-visible elements only (still no off-screen matches)
                     if (!best || bestScore === 0) {
-                        const all = Array.from(document.querySelectorAll('*')).filter(e => {
-                            const r = e.getBoundingClientRect();
-                            return r.width > 1 && r.height > 1;
-                        });
+                        const all = Array.from(document.querySelectorAll('*')).filter(e =>
+                            inViewport(e.getBoundingClientRect())
+                        );
                         for (const el of all) {
                             const s = score(el);
                             if (s > bestScore) { bestScore = s; best = el; }
