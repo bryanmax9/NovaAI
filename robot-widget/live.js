@@ -268,6 +268,19 @@ async function startLiveSession(mainWindow, automation) {
                     "STEP 5 — ADD TO CART: User says 'add to cart' / 'buy this' / 'add to bag' → smart_click 'Add to Bag' or 'Add to Cart'. " +
                     "If any option is missing, ask for it first, then click.\n\n" +
 
+                    "6. send_email — ONLY when user explicitly says 'send an email', 'email [person]', 'write an email to', or 'draft an email'.\n" +
+                    "   - Triggers: 'send Bryan an email saying the demo is ready', 'email jim@csulb.edu about the pitch'\n" +
+                    "   - NEVER triggers for: questions, topics, or anything that doesn't involve actively sending a message\n" +
+                    "   - After the tool responds, speak the confirmation: 'Email sent to [name]' or ask for clarification if needed\n\n" +
+
+                    "7. calendar_action — ONLY for explicit calendar operations: checking schedule, creating events, cancelling events, checking availability.\n" +
+                    "   - get_events triggers: 'what's on my calendar tomorrow', 'what do I have this week', 'what's my next meeting'\n" +
+                    "   - create_event triggers: 'block 2pm for deep work', 'schedule a call with Bryan on Monday at 10am', 'add gym at 6pm'\n" +
+                    "   - delete_event triggers: 'cancel my 4pm today', 'remove the standup tomorrow'\n" +
+                    "   - check_availability triggers: 'am I free at 10am', 'when am I free Friday afternoon'\n" +
+                    "   - NEVER triggers for: questions about time zones, general scheduling advice, or anything that doesn't read/write the calendar\n" +
+                    "   - After tool responds, speak the result naturally (e.g. 'You have 3 events tomorrow...')\n\n" +
+
                     "== LANGUAGE ==\n" +
                     "Always respond in the user's language. Tool parameter values must be in English.",
 
@@ -351,6 +364,68 @@ async function startLiveSession(mainWindow, automation) {
                                         }
                                     },
                                     required: ["company"]
+                                }
+                            },
+                            {
+                                name: "send_email",
+                                description: "Compose and send an email via Gmail. Use ONLY when the user explicitly says 'send an email', 'email someone', 'write an email to', 'draft an email', or similar direct email-sending commands. Nova automatically resolves the recipient name to an email address from the user's Gmail history. NEVER call for questions or conversation.",
+                                parameters: {
+                                    type: "OBJECT",
+                                    properties: {
+                                        recipient_name: {
+                                            type: "STRING",
+                                            description: "Name of the person to email. Nova will look up their address automatically. Can also be a full email address."
+                                        },
+                                        subject: {
+                                            type: "STRING",
+                                            description: "Brief subject line for the email. Nova will generate one if not provided."
+                                        },
+                                        message_intent: {
+                                            type: "STRING",
+                                            description: "What the email should say — the user's spoken intent in their own words. Nova will expand this into a professional email body."
+                                        },
+                                        draft_only: {
+                                            type: "BOOLEAN",
+                                            description: "If true, save as Gmail draft instead of sending immediately. Default: false."
+                                        }
+                                    },
+                                    required: ["recipient_name", "message_intent"]
+                                }
+                            },
+                            {
+                                name: "calendar_action",
+                                description: "Read or modify the user's Google Calendar. Use for any request involving schedules, meetings, events, availability, or time blocking. Actions: get_events (read calendar), create_event (add event/meeting/block), delete_event (cancel event), check_availability (find free slots). NEVER call for general questions — only for explicit calendar operations.",
+                                parameters: {
+                                    type: "OBJECT",
+                                    properties: {
+                                        action: {
+                                            type: "STRING",
+                                            enum: ["get_events", "create_event", "delete_event", "check_availability"],
+                                            description: "Calendar operation: get_events=read schedule, create_event=add new event, delete_event=cancel event, check_availability=find free time."
+                                        },
+                                        time_expression: {
+                                            type: "STRING",
+                                            description: "Natural language time reference. Examples: 'tomorrow', 'this week', 'Friday at 3pm', 'today at 2pm', 'next Monday morning', 'in 2 hours'."
+                                        },
+                                        event_title: {
+                                            type: "STRING",
+                                            description: "Title/name of the event. Required for create_event. Used to look up events for delete_event."
+                                        },
+                                        duration_minutes: {
+                                            type: "NUMBER",
+                                            description: "Duration of the event in minutes. Default: 60."
+                                        },
+                                        attendees: {
+                                            type: "ARRAY",
+                                            items: { type: "STRING" },
+                                            description: "List of names or email addresses to invite. Nova will resolve names to email addresses."
+                                        },
+                                        event_id: {
+                                            type: "STRING",
+                                            description: "Event ID for delete_event. If omitted, Nova looks up the event by title."
+                                        }
+                                    },
+                                    required: ["action"]
                                 }
                             }
                         ]
@@ -771,6 +846,88 @@ async function startLiveSession(mainWindow, automation) {
                                         console.error('📈 [Stock] Unexpected error:', e.message);
                                         if (activeSession) {
                                             activeSession.sendRealtimeInput({ text: `[STOCK DATA ERROR] Could not retrieve data for ${company}. Answer conversationally using your training knowledge about this company's market performance.` });
+                                        }
+                                    });
+                                }
+
+                            } else if (call.name === 'send_email') {
+                                console.log(`📧 [Email Tool] recipient="${call.args.recipient_name}" intent="${call.args.message_intent}"`);
+
+                                // Acknowledge immediately so Nova can say "On it..." while processing
+                                activeSession.sendRealtimeInput({
+                                    functionResponses: [{
+                                        id: call.id,
+                                        response: {
+                                            status: "Processing",
+                                            message: `Looking up the email address and composing the message. Tell the user you are sending the email now, then wait quietly.`
+                                        }
+                                    }]
+                                });
+
+                                // Run async: resolve contact + generate body + send
+                                if (automationRef && automationRef.sendEmailTool) {
+                                    automationRef.sendEmailTool(call.args).then((result) => {
+                                        if (!activeSession) return;
+                                        const speakText = result.speak || result.message || 'Email processed.';
+                                        const instr = result.status === 'success'
+                                            ? `[EMAIL RESULT] ${speakText} Speak this confirmation out loud to the user now. Do NOT call any tool.`
+                                            : result.status === 'needs_clarification'
+                                            ? `[EMAIL NEEDS INPUT] ${speakText} Ask the user for the missing information.`
+                                            : result.status === 'auth_required'
+                                            ? `[EMAIL AUTH REQUIRED] ${speakText} Tell the user they need to authorize Gmail access by running npm run setup-google.`
+                                            : `[EMAIL ERROR] ${speakText} Tell the user what went wrong.`;
+                                        try {
+                                            activeSession.sendRealtimeInput({ text: instr });
+                                        } catch (e) {
+                                            console.error('📧 [Email] Failed to inject result:', e.message);
+                                        }
+                                    }).catch((e) => {
+                                        console.error('📧 [Email] Unexpected error:', e.message);
+                                        if (activeSession) {
+                                            activeSession.sendRealtimeInput({ text: `[EMAIL ERROR] The email could not be sent: ${e.message}. Tell the user there was a problem.` });
+                                        }
+                                    });
+                                }
+
+                            } else if (call.name === 'calendar_action') {
+                                const { action } = call.args;
+                                console.log(`📅 [Calendar Tool] action="${action}" time="${call.args.time_expression || ''}"`);
+
+                                // Acknowledge so Nova can say something while fetching
+                                const ackMsg = action === 'get_events'
+                                    ? `Checking your calendar right now. Tell the user you are looking at their schedule, then wait for the data.`
+                                    : action === 'create_event'
+                                    ? `Creating the event. Tell the user you are adding it to their calendar now.`
+                                    : action === 'delete_event'
+                                    ? `Looking up the event to cancel. Tell the user you are checking your calendar now.`
+                                    : `Checking your calendar availability. Tell the user you are looking at their schedule.`;
+
+                                activeSession.sendRealtimeInput({
+                                    functionResponses: [{
+                                        id: call.id,
+                                        response: { status: "Processing", message: ackMsg }
+                                    }]
+                                });
+
+                                // Run async
+                                if (automationRef && automationRef.calendarActionTool) {
+                                    automationRef.calendarActionTool(call.args).then((result) => {
+                                        if (!activeSession) return;
+                                        const speakText = result.speak || result.message || 'Calendar action complete.';
+                                        const instr = result.status === 'auth_required'
+                                            ? `[CALENDAR AUTH REQUIRED] ${speakText} Tell the user they need to authorize Google Calendar by running npm run setup-google.`
+                                            : result.status === 'error' || result.status === 'not_found'
+                                            ? `[CALENDAR ERROR] ${speakText} Tell the user what went wrong.`
+                                            : `[CALENDAR RESULT] ${speakText} Speak this to the user now in a natural, conversational way. Do NOT call any tool.`;
+                                        try {
+                                            activeSession.sendRealtimeInput({ text: instr });
+                                        } catch (e) {
+                                            console.error('📅 [Calendar] Failed to inject result:', e.message);
+                                        }
+                                    }).catch((e) => {
+                                        console.error('📅 [Calendar] Unexpected error:', e.message);
+                                        if (activeSession) {
+                                            activeSession.sendRealtimeInput({ text: `[CALENDAR ERROR] ${e.message}. Tell the user there was a problem accessing their calendar.` });
                                         }
                                     });
                                 }

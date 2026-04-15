@@ -7,6 +7,9 @@ const { generateSpeech } = require('./tts.js');
 const { askGemini } = require('./gemini.js');
 const { transcribeAudio } = require('./stt.js');
 const { startLiveSession, sendAudioChunk, sendTextChunk, endLiveSession, setBrowserOpen, setStoreAssistantActive } = require('./live.js');
+const googleAuth                 = require('./google_auth');
+const { handleSendEmailTool }    = require('./gmail');
+const { handleCalendarActionTool } = require('./calendar');
 
 // Terminate Chromium's Autoplay sandbox. We are a desktop app, not a website!
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -753,7 +756,25 @@ const Automation = {
     },
     showStockChart: async (company, symbol) => {
         return await showStockChartInternal(company, symbol);
-    }
+    },
+
+    // ── Gmail tool handler ────────────────────────────────────────────────
+    sendEmailTool: async (args) => {
+        const logFn = (msg) => {
+            if (mainWindow) mainWindow.webContents.send('automation-log', msg);
+            console.log('[Gmail Tool]', msg);
+        };
+        return await handleSendEmailTool(args, null, logFn);
+    },
+
+    // ── Calendar tool handler ─────────────────────────────────────────────
+    calendarActionTool: async (args) => {
+        const logFn = (msg) => {
+            if (mainWindow) mainWindow.webContents.send('automation-log', msg);
+            console.log('[Calendar Tool]', msg);
+        };
+        return await handleCalendarActionTool(args, logFn);
+    },
 };
 
 ipcMain.handle('execute-automation', async (event, action) => {
@@ -2463,7 +2484,86 @@ ipcMain.handle('generate-research-paper', async (event, topic) => {
     return { started: true };
 });
 
+// ── Google Auth IPC ────────────────────────────────────────────────────────
+
+ipcMain.handle('google-auth-status', async () => {
+    return { authenticated: googleAuth.isAuthenticated() };
+});
+
+ipcMain.handle('google-auth-revoke', async () => {
+    const ok = await googleAuth.revokeAccess();
+    return { success: ok };
+});
+
+// ── Gmail IPC ──────────────────────────────────────────────────────────────
+
+ipcMain.handle('gmail-status', async () => {
+    return { authenticated: googleAuth.isAuthenticated() };
+});
+
+ipcMain.handle('gmail-authenticate', async () => {
+    if (googleAuth.isAuthenticated()) return 'already_authenticated';
+    try {
+        const { getAuthClient } = require('./google_auth');
+        await getAuthClient();
+        return 'authenticated';
+    } catch (e) {
+        console.error('[IPC] gmail-authenticate error:', e.message);
+        return { error: e.message };
+    }
+});
+
+ipcMain.handle('gmail-send', async (event, { to, subject, body }) => {
+    try {
+        const { sendEmail } = require('./gmail');
+        return await sendEmail({ to, subject, body });
+    } catch (e) {
+        console.error('[IPC] gmail-send error:', e.message);
+        return { success: false, error: e.message };
+    }
+});
+
+// ── Calendar IPC ───────────────────────────────────────────────────────────
+
+ipcMain.handle('calendar-status', async () => {
+    return { authenticated: googleAuth.isAuthenticated() };
+});
+
+ipcMain.handle('calendar-get-events', async (event, { startDate, endDate }) => {
+    try {
+        const { getEventsInRange } = require('./calendar');
+        return await getEventsInRange(startDate, endDate);
+    } catch (e) {
+        console.error('[IPC] calendar-get-events error:', e.message);
+        return { error: e.message };
+    }
+});
+
+ipcMain.handle('calendar-create-event', async (event, { title, startTime, endTime, attendees }) => {
+    try {
+        const { createEvent } = require('./calendar');
+        return await createEvent({ title, startTime, endTime, attendees });
+    } catch (e) {
+        console.error('[IPC] calendar-create-event error:', e.message);
+        return { success: false, error: e.message };
+    }
+});
+
+ipcMain.handle('calendar-delete-event', async (event, { eventId }) => {
+    try {
+        const { deleteEvent } = require('./calendar');
+        return await deleteEvent(eventId);
+    } catch (e) {
+        console.error('[IPC] calendar-delete-event error:', e.message);
+        return { success: false, error: e.message };
+    }
+});
+
 app.whenReady().then(() => {
+    // Wire shell.openExternal into Google OAuth so consent flows open in the default browser
+    googleAuth.initialize((url) => shell.openExternal(url));
+    console.log(`[Nova] Google Auth status: ${googleAuth.isAuthenticated() ? '✅ authenticated' : '⚠️  not authenticated (run npm run setup-google)'}`);
+
     const { session } = require('electron');
     session.defaultSession.setPermissionCheckHandler(() => true);
     session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => callback(true));
