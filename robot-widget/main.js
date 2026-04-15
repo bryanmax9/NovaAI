@@ -1,6 +1,7 @@
 const { app, BrowserWindow, screen, protocol, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const https = require('https');
 const { spawn, exec } = require('child_process');
 const { generateSpeech } = require('./tts.js');
 const { askGemini } = require('./gemini.js');
@@ -260,6 +261,65 @@ function _snapHome() {
 
 ipcMain.on('nova-bounce-stop', () => _snapHome());
 
+// ── Stock Mode Position ────────────────────────────────────────────────────
+// When the stock chart is open, Nova moves to the top-right corner so the
+// floating card (top-left) and Nova sit on opposite ends of the screen.
+// When the chart closes, Nova resumes whatever it was doing before.
+
+let _stockModeActive = false;
+let _preBounceActive = false; // was _bounceActive true before stock mode?
+
+function _getTopRightPosition() {
+    const { width } = screen.getPrimaryDisplay().workAreaSize;
+    return { x: width - WINDOW_WIDTH, y: 10 };
+}
+
+function _snapToTopRight() {
+    _stockModeActive = true;
+    _preBounceActive = _bounceActive;
+
+    // Pause wander without clearing _bounceActive flag — we restore it on exit
+    _bouncePaused = true;
+    if (bounceInterval) { clearInterval(bounceInterval); bounceInterval = null; }
+    if (_snapInterval)  { clearInterval(_snapInterval);  _snapInterval  = null; }
+
+    if (!mainWindow) return;
+    const target = _getTopRightPosition();
+    const start  = mainWindow.getBounds();
+    let t = 0;
+
+    _snapInterval = setInterval(() => {
+        if (!mainWindow) { clearInterval(_snapInterval); _snapInterval = null; return; }
+        t += 0.055;
+        if (t >= 1) { t = 1; clearInterval(_snapInterval); _snapInterval = null; }
+        const ease = 1 - Math.pow(1 - t, 3);
+        mainWindow.setBounds({
+            x: Math.round(start.x + (target.x - start.x) * ease),
+            y: Math.round(start.y + (target.y - start.y) * ease),
+            width: WINDOW_WIDTH,
+            height: WINDOW_HEIGHT
+        });
+    }, 16);
+}
+
+function _restoreFromStockMode() {
+    if (!_stockModeActive) return;
+    _stockModeActive = false;
+
+    if (_preBounceActive) {
+        // Nova was in conversation → resume wandering from top-right position
+        _bouncePaused = false;
+        if (mainWindow) {
+            const bounds = mainWindow.getBounds();
+            _bouncePos = { x: bounds.x, y: bounds.y };
+        }
+        _startWanderInterval();
+    } else {
+        // Nova was idle → snap back to bottom-right home
+        _snapHome();
+    }
+}
+
 let chatWin = null;
 function createChatWindow() {
     if (chatWin) {
@@ -476,6 +536,201 @@ function smartClickBrowser(text) {
     if (browserWin) browserWin.webContents.send('smart-click', text);
 }
 
+// ── Stock Chart Feature ────────────────────────────────────────────────────
+
+let stockWin = null;
+
+function httpsGetJSON(url) {
+    return new Promise((resolve, reject) => {
+        const req = https.get(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Cache-Control': 'no-cache',
+            }
+        }, (res) => {
+            if (res.statusCode !== 200) {
+                res.resume();
+                reject(new Error(`HTTP ${res.statusCode}`));
+                return;
+            }
+            let raw = '';
+            res.on('data', chunk => { raw += chunk; });
+            res.on('end', () => {
+                try { resolve(JSON.parse(raw)); }
+                catch (e) { reject(new Error('Invalid JSON response')); }
+            });
+        });
+        req.on('error', reject);
+        req.setTimeout(10000, () => { req.destroy(); reject(new Error('Request timeout')); });
+    });
+}
+
+function computeStockOutlook(prices, company) {
+    const valid = prices.filter(p => p !== null && !isNaN(p));
+    if (valid.length < 10) return 'Insufficient historical data for analysis.';
+
+    const first = valid[0];
+    const last  = valid[valid.length - 1];
+    const pctChange = ((last - first) / first) * 100;
+    const absChange = Math.abs(pctChange).toFixed(1);
+
+    // Recent vs prior momentum (last 10 days vs prev 10)
+    const recent = valid.slice(-10).reduce((a, b) => a + b, 0) / 10;
+    const prior  = valid.slice(-20, -10).reduce((a, b) => a + b, 0) / (valid.slice(-20, -10).length || 1);
+    const momentum = prior ? ((recent - prior) / prior) * 100 : 0;
+
+    const trend = pctChange >= 0 ? `gained ${absChange}%` : `declined ${absChange}%`;
+    const mWord = momentum >= 1.5 ? 'building upward momentum' :
+                  momentum <= -1.5 ? 'showing renewed selling pressure' :
+                  'trading sideways in consolidation';
+
+    let hint = '';
+    if (pctChange < -15) hint = 'The pullback may attract value investors near current levels.';
+    else if (pctChange > 20) hint = 'Strong rally underway — watch for resistance near recent highs.';
+    else hint = 'Price is stabilizing within a moderate range.';
+
+    return `${company} has ${trend} over the past 3 months and is ${mWord}. ${hint}`;
+}
+
+function createStockWindow() {
+    if (stockWin) {
+        stockWin.focus();
+        return;
+    }
+    stockWin = new BrowserWindow({
+        width: 340,
+        height: 340,
+        x: 20,
+        y: 20,
+        transparent: true,
+        frame: false,
+        alwaysOnTop: true,
+        skipTaskbar: true,
+        resizable: false,
+        ...(process.platform === 'linux' ? { type: 'toolbar' } : {}),
+        webPreferences: {
+            nodeIntegration: true,
+            contextIsolation: false,
+        }
+    });
+    stockWin.loadFile(path.join(__dirname, 'stock.html'));
+    stockWin.setAlwaysOnTop(true, 'screen-saver');
+    stockWin.once('ready-to-show', () => stockWin && stockWin.show());
+    stockWin.on('closed', () => {
+        stockWin = null;
+        _restoreFromStockMode();
+    });
+}
+
+async function showStockChartInternal(company, symbol) {
+    try {
+        let resolvedSymbol = (symbol || '').toUpperCase().trim();
+        let resolvedCompany = company || '';
+        let exchange = '';
+
+        // Symbol lookup when not provided or explicitly unknown
+        if (!resolvedSymbol || resolvedSymbol === 'UNKNOWN') {
+            console.log(`📈 [Stock] Searching symbol for: "${company}"`);
+            const searchUrl = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(company)}&quotesCount=1&newsCount=0&enableEnhancedTrivialQuery=true`;
+            const searchData = await httpsGetJSON(searchUrl);
+            const quote = searchData?.quotes?.[0];
+            if (quote && quote.symbol) {
+                resolvedSymbol = quote.symbol;
+                resolvedCompany = quote.shortname || quote.longname || company;
+                exchange = quote.exchDisp || '';
+            } else {
+                throw new Error(`No symbol found for "${company}"`);
+            }
+        }
+
+        console.log(`📈 [Stock] Fetching chart data for: ${resolvedSymbol}`);
+        const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(resolvedSymbol)}?interval=1d&range=3mo&includePrePost=false`;
+        const chartData = await httpsGetJSON(chartUrl);
+
+        const result = chartData?.chart?.result?.[0];
+        if (!result) throw new Error('No chart data in response');
+
+        const meta       = result.meta || {};
+        const prices     = result.indicators?.quote?.[0]?.close || [];
+        const timestamps = result.timestamp || [];
+
+        const price     = meta.regularMarketPrice || meta.chartPreviousClose || 0;
+        const prevClose = meta.previousClose      || meta.chartPreviousClose  || price;
+        const change    = price - prevClose;
+        const changePct = prevClose ? (change / prevClose) * 100 : 0;
+
+        const firstDate = timestamps[0]
+            ? new Date(timestamps[0] * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+            : '3 months ago';
+
+        const stockInfo = {
+            company:   meta.shortName || resolvedCompany,
+            symbol:    resolvedSymbol,
+            exchange:  meta.exchangeName || exchange,
+            currency:  meta.currency || 'USD',
+            price,
+            change,
+            changePct,
+            high52:    meta.fiftyTwoWeekHigh,
+            low52:     meta.fiftyTwoWeekLow,
+            volume:    meta.regularMarketVolume,
+            prices,
+            firstDate,
+            outlook:   computeStockOutlook(prices, meta.shortName || resolvedCompany)
+        };
+
+        // Move Nova to top-right while chart is visible
+        _snapToTopRight();
+
+        // Open / refresh stock window
+        createStockWindow();
+        const sendData = () => {
+            if (stockWin) stockWin.webContents.send('stock-data', stockInfo);
+        };
+        if (stockWin) {
+            if (stockWin.webContents.isLoading()) {
+                stockWin.webContents.once('did-finish-load', sendData);
+            } else {
+                sendData();
+            }
+        }
+
+        // Return rich summary so Gemini Live can narrate
+        const dir  = change >= 0 ? 'up' : 'down';
+        const sign = change >= 0 ? '+' : '';
+        const summary =
+            `Chart for ${stockInfo.company} (${resolvedSymbol}) is now displayed. ` +
+            `Current price: $${price.toFixed(2)}, ${dir} ${sign}${changePct.toFixed(2)}% today. ` +
+            `52-week range: $${(meta.fiftyTwoWeekLow || 0).toFixed(2)} – $${(meta.fiftyTwoWeekHigh || 0).toFixed(2)}. ` +
+            `Outlook: ${stockInfo.outlook}`;
+
+        console.log(`📈 [Stock] Success: ${resolvedSymbol} @ $${price.toFixed(2)}`);
+        return { success: true, summary, company: stockInfo.company, symbol: resolvedSymbol, price, changePct };
+
+    } catch (err) {
+        console.error(`📈 [Stock] Error: ${err.message}`);
+        // Show error in window if already created
+        if (stockWin) stockWin.webContents.send('stock-data', { error: true });
+        return {
+            success: false,
+            summary: `Could not fetch live stock data for "${company}". The data provider may be temporarily unavailable. Describe what you know about this company's recent market performance from your training knowledge instead.`
+        };
+    }
+}
+
+// IPC: close stock window from renderer (X button or auto-close timer)
+ipcMain.on('close-stock-window', () => {
+    if (stockWin) {
+        stockWin.close();
+        stockWin = null;
+    }
+    _restoreFromStockMode();
+});
+
+// ── End Stock Chart Feature ────────────────────────────────────────────────
+
 const Automation = {
     openBrowser,
     scrollBrowser,
@@ -495,6 +750,9 @@ const Automation = {
     },
     generatePaper: (topic) => {
         generateResearchPaper(topic, mainWindow);
+    },
+    showStockChart: async (company, symbol) => {
+        return await showStockChartInternal(company, symbol);
     }
 };
 

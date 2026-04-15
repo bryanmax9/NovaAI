@@ -206,48 +206,67 @@ async function startLiveSession(mainWindow, automation) {
                     "     'find research paper climate change'\n" +
                     "   If you are even slightly unsure, DO NOT call this tool — answer conversationally instead.\n\n" +
 
+                    "5. show_stock_chart — Call this whenever the user asks about: stock prices, market performance, price trends, whether a product price is dropping or rising, or how a company is doing financially.\n" +
+                    "   TRIGGER EXAMPLES:\n" +
+                    "   - 'when is the price of iPhone dropping' → company='Apple', symbol='AAPL'\n" +
+                    "   - 'when are Pokemon prices dropping' → company='Nintendo', symbol='NTDOY'\n" +
+                    "   - 'how is Tesla doing in the market' → company='Tesla', symbol='TSLA'\n" +
+                    "   - 'what's happening with Google stock' → company='Alphabet', symbol='GOOGL'\n" +
+                    "   - 'show me the stock market for Microsoft' → company='Microsoft', symbol='MSFT'\n" +
+                    "   - 'is Amazon a good buy right now' → company='Amazon', symbol='AMZN'\n" +
+                    "   - 'how are Nintendo Switch prices trending' → company='Nintendo', symbol='NTDOY'\n" +
+                    "   Common tickers: Apple=AAPL, Microsoft=MSFT, Tesla=TSLA, Amazon=AMZN, Google/Alphabet=GOOGL,\n" +
+                    "     Meta=META, Netflix=NFLX, Nvidia=NVDA, AMD=AMD, Intel=INTC, Samsung=005930.KS,\n" +
+                    "     Sony=SONY, Nintendo=NTDOY, Disney=DIS, Spotify=SPOT, Uber=UBER, Airbnb=ABNB.\n" +
+                    "   If you don't know the ticker symbol, pass the company name and leave symbol empty — the system will look it up.\n" +
+                    "   After calling this tool, narrate the result out loud: current price, daily change, 3-month trend, and outlook.\n" +
+                    "   NEVER opens the browser for stock questions — always use show_stock_chart instead.\n\n" +
+
                     "== CLICKING ==\n" +
                     "When user says 'click on X' or 'click X': immediately call control_browser with action='smart_click' and target_text='X'. Do not call get_browser_state first.\n\n" +
 
                     "== AFTER ANY TOOL CALL ==\n" +
                     "Confirm the action in one short sentence, then return to normal conversation.\n\n" +
 
-                    "== STORE ASSISTANT MODE ==\n" +
-                    "When you receive a [STORE DETECTED - SYSTEM NOTIFICATION] message, your ONLY job is to speak a warm verbal greeting and ask what the user wants to buy. " +
-                    "ABSOLUTELY DO NOT call get_browser_state, control_browser, or any tool when you receive this notification. " +
-                    "Just talk. Wait for the user to tell you what they want BEFORE using any tools.\n\n" +
+                    "== STORE ASSISTANT MODE — PERMANENT UNTIL BROWSER CLOSES ==\n" +
+                    "Store mode is activated the moment you land on a known shopping site. It NEVER ends due to conversation, stock charts, questions, or topic changes. " +
+                    "The ONLY exit is the user explicitly saying 'close the browser' and you calling control_browser action='close'. " +
+                    "Even if you just spent 10 minutes discussing stocks or answering unrelated questions — if the browser is on a store, you are the shopping guide the instant the user mentions a product.\n\n" +
 
-                    "DIRECT URL NAVIGATION — If you receive a [NAVIGATION STUCK] message, or if smart_click fails to reach a product page, " +
-                    "use control_browser action='open' with a direct URL you construct from your knowledge. " +
-                    "Known Apple URL patterns: apple.com/shop/buy-iphone/iphone-15 (iPhone 15), apple.com/shop/buy-iphone/iphone-16 (iPhone 16), " +
+                    "When you receive a [STORE DETECTED - SYSTEM NOTIFICATION] message: speak a warm greeting and ask what they want to buy. " +
+                    "ABSOLUTELY DO NOT call any tool when receiving this notification. Just talk.\n\n" +
+
+                    "╔══ GOLDEN RULE — PRODUCT NAME = NAVIGATE IMMEDIATELY ══╗\n" +
+                    "When on a store page and the user says ANY product name (iPhone, MacBook, iPad, AirPods, Watch, shoe, ring, console — anything), " +
+                    "your ONLY valid responses are:\n" +
+                    "  a) control_browser action='smart_click' target_text='[product name]' — click the nav link\n" +
+                    "  b) control_browser action='open' query='[direct URL]' — navigate directly\n" +
+                    "NEVER call get_browser_state in response to a product name. get_browser_state is for AFTER you navigate, not before.\n" +
+                    "This rule applies whether the store greeting just fired 10 seconds ago OR you've been chatting about something else for 30 minutes.\n" +
+                    "╚══════════════════════════════════════════════════════╝\n\n" +
+
+                    "DIRECT URL NAVIGATION — If you receive a [NAVIGATION STUCK] message, or if smart_click fails once, " +
+                    "immediately switch to control_browser action='open' with a direct URL. " +
+                    "Apple direct URLs (use these if smart_click fails): " +
+                    "apple.com/shop/buy-iphone (all iPhones), apple.com/shop/buy-iphone/iphone-16 (iPhone 16), " +
                     "apple.com/shop/buy-iphone/iphone-16-pro (iPhone 16 Pro), apple.com/shop/buy-ipad/ipad-air (iPad Air), " +
                     "apple.com/shop/buy-ipad/ipad-pro (iPad Pro), apple.com/shop/buy-mac/macbook-pro (MacBook Pro), " +
-                    "apple.com/shop/buy-mac/macbook-air (MacBook Air), apple.com/shop/buy-watch/apple-watch-series-10 (Apple Watch Series 10). " +
-                    "For Amazon: amazon.com/s?k=<product+name>. For eBay: ebay.com/sch/i.html?_nkw=<product+name>.\n\n" +
+                    "apple.com/shop/buy-mac/macbook-air (MacBook Air), apple.com/shop/buy-watch/apple-watch-series-10 (Watch Series 10), " +
+                    "apple.com/shop/buy-airpods (AirPods). " +
+                    "Amazon: amazon.com/s?k=<product+name>. eBay: ebay.com/sch/i.html?_nkw=<product+name>.\n\n" +
 
-                    "Once the user tells you what they want, follow this shopping flow:\n" +
-                    "STEP 1 — CATEGORY NAV: Use smart_click to navigate to that product section on the site. " +
-                    "If smart_click fails to navigate after 1 attempt, skip to direct URL navigation instead of retrying.\n" +
-                    "STEP 2 — READ PRODUCT LIST: After clicking to a category page, call get_browser_state to read what products are listed. " +
-                    "The tool response will contain instructions telling you to narrate — follow them. " +
-                    "List the products out loud, add your own knowledge about popularity and what is best-rated, and ask which one they want. " +
-                    "Example: 'On this page I can see the iPad mini, iPad Air, iPad, and iPad Pro. The Pro is Apple's most powerful tablet, loved by creators and professionals. The Air is the sweet spot for most people — great performance at a lower price. Which one would you like to check out? I can click it for you.'\n" +
-                    "STEP 3 — READ PRODUCT DETAILS: After the user names a product and you click it, call get_browser_state ONCE on that product page. " +
-                    "IMPORTANT: Some product pages are marketing/overview pages that do not show prices in their DOM. " +
-                    "If the tool response says 'NOTE: This page does not show prices' — do NOT call get_browser_state again. " +
-                    "Instead, immediately speak from your own knowledge about that product's current prices, models, storage options, and variants. " +
-                    "You know Apple's full lineup, Amazon pricing, eBay listing ranges, and major retailer product specs — use that knowledge. " +
-                    "Read all variants, sizes, storage tiers, materials, colors, and prices from the elements and narrate everything naturally. " +
-                    "Also add what you know from your own knowledge: notable specs, who it is best for, common review highlights. " +
-                    "Example for Apple: 'The iPad Air comes in 11-inch starting at $599 or 13-inch starting at $799. Storage is 128GB or 256GB, and you can add Wi-Fi plus Cellular for $150 more. The M3 chip makes it faster than most laptops — reviewers love it for drawing, note-taking, and media. Which size and storage are you thinking?' " +
-                    "Example for jewelry: 'This ring is available in yellow gold, white gold, and rose gold, sizes 5 through 10, starting at $420. Customers love the yellow gold version — it is the best-seller. Which metal and size would you like?' " +
-                    "Example for Amazon/eBay: 'There are three options here — brand new from $349, used from $210, and Amazon Renewed at $275 with a 90-day guarantee. For most people the Renewed option is the best value. Which would you prefer?' " +
-                    "STEP 4 — SELECT CONFIG: When the user picks a config, use smart_click to select those options on the page (size button, color swatch, storage tier, etc.) and confirm what was selected.\n" +
-                    "STEP 5 — ADD TO CART: When the user says 'add to cart', 'buy this', 'add to bag', or similar purchase intent:\n" +
-                    "  a) If a specific model, size, storage, and color have already been chosen, use smart_click to click 'Add to Bag', 'Add to Cart', or the equivalent button on the page.\n" +
-                    "  b) If any required option is still missing (e.g. user hasn't picked storage size, color, or connectivity), ask for it first: 'Before I add it to the bag, which storage size do you want — 128GB or 256GB?' Then once confirmed, click the option and then click Add to Bag.\n" +
-                    "  c) After clicking Add to Bag, confirm: 'Done! I've added the [product + config] to your bag. Want to keep shopping or head to checkout?'\n" +
-                    "Stay in store-guide mode until the user asks to leave or changes topic.\n\n" +
+                    "SHOPPING FLOW (applies on first mention AND after any conversation break):\n" +
+                    "STEP 1 — NAVIGATE (do this first, always): User names a product → call smart_click with that product name. " +
+                    "DO NOT call get_browser_state first. You know Apple's nav has iPhone, iPad, Mac, Watch, AirPods links. Just click. " +
+                    "If the page URL does not change after 1 smart_click attempt, immediately use control_browser action='open' with a direct Apple URL.\n" +
+                    "STEP 2 — READ PAGE (only after landing on a new page): Call get_browser_state ONCE after navigation. " +
+                    "The response will tell you to narrate — list the products, add your knowledge, ask which one they want.\n" +
+                    "STEP 3 — READ PRODUCT DETAILS: After user picks a product and you click it, call get_browser_state ONCE on that product page. " +
+                    "If the response says 'NOTE: This page does not show prices', speak from your own knowledge about prices, models, storage, and variants. " +
+                    "DO NOT call get_browser_state again.\n" +
+                    "STEP 4 — SELECT CONFIG: User picks a variant → smart_click to select size, color, or storage. Confirm selection.\n" +
+                    "STEP 5 — ADD TO CART: User says 'add to cart' / 'buy this' / 'add to bag' → smart_click 'Add to Bag' or 'Add to Cart'. " +
+                    "If any option is missing, ask for it first, then click.\n\n" +
 
                     "== LANGUAGE ==\n" +
                     "Always respond in the user's language. Tool parameter values must be in English.",
@@ -257,7 +276,7 @@ async function startLiveSession(mainWindow, automation) {
                         functionDeclarations: [
                             {
                                 name: "get_browser_state",
-                                description: "Returns a list of all visible interactive elements on the current browser page, including their text, labels, and types. Use this in two situations: (1) when the user explicitly asks what is on screen or to list elements; (2) automatically in Store Assistant Mode after navigating to a product category page or a product detail page, so you can read product names, variants, sizes, storage options, materials, prices, and plans — then narrate them to the user. Do NOT call this before clicking for a user-requested click — for all user-requested clicks use control_browser with action='smart_click' directly.",
+                                description: "Returns visible interactive elements on the current browser page. WHEN TO CALL: (1) user explicitly asks 'what is on screen' or 'list elements'; (2) Store Mode ONLY — AFTER you have already navigated to a new page (Step 2 or Step 3 of the shopping flow). NEVER call this as a response to a user naming a product — a product name means NAVIGATE (smart_click or open), not read the page. NEVER call on the same URL twice in a row without navigating in between. If you just called get_browser_state and received the page elements, and the user says a product name — do NOT call again. Use smart_click instead.",
                                 parameters: { type: "OBJECT", properties: {} }
                             },
                             {
@@ -314,6 +333,24 @@ async function startLiveSession(mainWindow, automation) {
                                         }
                                     },
                                     required: ["topic"]
+                                }
+                            },
+                            {
+                                name: "show_stock_chart",
+                                description: "Fetches live stock market data and displays an interactive chart for a company. Call this whenever the user asks about stock prices, market performance, whether a product's price is dropping, or how a company is doing financially. Examples: 'when is iPhone price dropping' (Apple/AAPL), 'when will Pokemon prices drop' (Nintendo/NTDOY), 'how is Tesla stock doing', 'show me Amazon market performance'. After calling, narrate the result: current price, daily change, 3-month trend, and what it means for the user's question.",
+                                parameters: {
+                                    type: "OBJECT",
+                                    properties: {
+                                        company: {
+                                            type: "STRING",
+                                            description: "The full company name (e.g., 'Apple Inc.', 'Tesla', 'Nintendo'). Required."
+                                        },
+                                        symbol: {
+                                            type: "STRING",
+                                            description: "The stock ticker symbol (e.g., 'AAPL', 'TSLA', 'NTDOY'). If you know it, provide it. If not, leave empty and the system will look it up from the company name."
+                                        }
+                                    },
+                                    required: ["company"]
                                 }
                             }
                         ]
@@ -448,12 +485,23 @@ async function startLiveSession(mainWindow, automation) {
                                     ? ''
                                     : ' NOTE: This page does not show prices in its elements — it may be a marketing/overview page. Use your own training knowledge to describe this product\'s current prices, models, and variants. Do NOT call get_browser_state again.';
 
+                                // Detect if this is a store homepage (no product path) vs. a product/category page
+                                const isStoreHomepage = looksLikeStorePage &&
+                                    !/\/shop\/buy|\/shop\/product|\/dp\/|\/itm\/|\/s\?k=|\/buy-iphone|\/buy-ipad|\/buy-mac|\/buy-watch|\/buy-airpods|\/products?\/|\/category|\/collections?\//.test((url || '').toLowerCase());
+
                                 const info = looksLikeStorePage
-                                    ? "You are in Store Assistant Mode on a shopping page. " +
-                                      "Read through these elements carefully and extract: product names, model variants, sizes, storage tiers, colors, materials, prices, and ratings. " +
-                                      "Immediately speak out loud in a friendly, enthusiastic way — list the products and prices you found, add your own knowledge about popularity and best value, and ask the user which one they want. " +
-                                      "Do NOT stay silent. Do NOT say 'I found X elements'. Narrate like a shopping guide and then ask your follow-up question." +
-                                      priceNote
+                                    ? (isStoreHomepage
+                                        ? "You are on the store HOMEPAGE. The navigation links visible here (iPhone, iPad, Mac, Watch, AirPods, etc.) are what you need to click. " +
+                                          "Speak briefly: tell the user you can see the main product categories and ask what they want. " +
+                                          "CRITICAL: After the user names a product, do NOT call get_browser_state again. " +
+                                          "Immediately call control_browser action='smart_click' with the product name, or use action='open' with a direct URL. " +
+                                          "For Apple: iPhones → smart_click 'iPhone', iPads → smart_click 'iPad', Mac → smart_click 'Mac', etc." +
+                                          priceNote
+                                        : "You are in Store Assistant Mode on a product/category page. " +
+                                          "Read through these elements carefully and extract: product names, model variants, sizes, storage tiers, colors, materials, prices, and ratings. " +
+                                          "Immediately speak out loud in a friendly, enthusiastic way — list the products and prices you found, add your own knowledge about popularity and best value, and ask the user which one they want. " +
+                                          "Do NOT stay silent. Do NOT say 'I found X elements'. Narrate like a shopping guide and then ask your follow-up question." +
+                                          priceNote)
                                     : "List of interactive elements on the current page. Use smart_click with the element text to click any of them.";
 
                                 activeSession.sendRealtimeInput({
@@ -686,6 +734,46 @@ async function startLiveSession(mainWindow, automation) {
                                         }
                                     }]
                                 });
+
+                            } else if (call.name === 'show_stock_chart') {
+                                const { company, symbol } = call.args;
+                                console.log(`📈 [Stock Tool] Fetching: ${company} (${symbol || 'lookup'})`);
+
+                                // Immediately send an ack so Nova can say "Let me pull that up..."
+                                // while the fetch runs in the background — then inject result
+                                activeSession.sendRealtimeInput({
+                                    functionResponses: [{
+                                        id: call.id,
+                                        response: {
+                                            status: "Fetching",
+                                            message: `Pulling live market data for ${company}. Tell the user you are looking up the stock chart right now, then stay quiet for a moment while the data loads.`
+                                        }
+                                    }]
+                                });
+
+                                // Async fetch + inject result as a follow-up text message
+                                if (automationRef && automationRef.showStockChart) {
+                                    automationRef.showStockChart(company, symbol || '').then((result) => {
+                                        if (!activeSession) return;
+                                        // If the browser is currently on a store, remind Gemini it's still in store mode
+                                        const storeNote = (_storeAssistantActive && _browserIsOpen)
+                                            ? ' REMINDER: The browser is still open on a shopping store. You remain in Store Shopping Guide mode. After narrating this stock data, if the user asks about any product, immediately use smart_click or control_browser action=\'open\' — do NOT call get_browser_state first.'
+                                            : '';
+                                        const msg = result.success
+                                            ? `[STOCK DATA LOADED] ${result.summary}${storeNote} Now speak out loud: describe the current price, the percentage change today, the 3-month trend shown on the chart, and what it means for the user's original question (e.g. whether prices are likely to drop or rise). Be specific and helpful. Do NOT call any tool.`
+                                            : `[STOCK DATA UNAVAILABLE] ${result.summary}${storeNote} Speak from your own knowledge about this company's recent market performance and price trends. Be helpful and honest.`;
+                                        try {
+                                            activeSession.sendRealtimeInput({ text: msg });
+                                        } catch (e) {
+                                            console.error('📈 [Stock] Failed to inject result:', e.message);
+                                        }
+                                    }).catch((e) => {
+                                        console.error('📈 [Stock] Unexpected error:', e.message);
+                                        if (activeSession) {
+                                            activeSession.sendRealtimeInput({ text: `[STOCK DATA ERROR] Could not retrieve data for ${company}. Answer conversationally using your training knowledge about this company's market performance.` });
+                                        }
+                                    });
+                                }
                             }
                         }
                     }
