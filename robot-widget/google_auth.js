@@ -129,7 +129,16 @@ async function runOAuthFlow(client) {
         scope: SCOPES,
         prompt: 'consent',
     });
-    console.log('[GoogleAuth] Opening OAuth consent URL in browser...');
+
+    // Always print the URL so the user can copy-paste it manually if the
+    // browser doesn't open automatically (common on headless / Wayland setups).
+    console.log('\n[GoogleAuth] ─────────────────────────────────────────────');
+    console.log('[GoogleAuth] Opening OAuth consent URL in your browser...');
+    console.log('[GoogleAuth] If the browser does NOT open automatically,');
+    console.log('[GoogleAuth] copy and paste this URL into your browser:\n');
+    console.log('  ' + authUrl + '\n');
+    console.log('[GoogleAuth] ─────────────────────────────────────────────\n');
+
     openUrl(authUrl);
 
     const code = await waitForOAuthCode();

@@ -1,9 +1,9 @@
 'use strict';
 require('dotenv').config();
-const { google }         = require('googleapis');
-const { GoogleGenAI }    = require('@google/genai');
-const { getAuthClient }  = require('./google_auth');
-const { searchContacts } = require('./gmail');
+const { google }                    = require('googleapis');
+const { GoogleGenAI }               = require('@google/genai');
+const { getAuthClient, isAuthenticated } = require('./google_auth');
+const { searchContacts }            = require('./gmail');
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
@@ -232,6 +232,14 @@ async function findFreeSlots(dateISO, durationMinutes = 60) {
 async function handleCalendarActionTool(args, logFn) {
     const log = logFn || ((msg) => console.log('[Calendar Tool]', msg));
     const { action, time_expression, event_title, duration_minutes = 60, attendees = [], event_id } = args;
+
+    // Guard: never trigger the interactive OAuth browser flow inside the live session.
+    // The user must run `npm run setup-google` first to save a token.
+    if (!isAuthenticated()) {
+        const msg = 'Google Calendar is not connected yet. To use it, open a terminal in the robot-widget folder and run: npm run setup-google — it will open a browser to authorize access. After that, restart Nova and calendar will work.';
+        log('⚠️ [Calendar] Not authenticated — returning auth_required');
+        return { status: 'auth_required', speak: msg, message: msg };
+    }
 
     try {
         if (action === 'get_events') {

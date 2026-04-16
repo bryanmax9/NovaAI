@@ -2,7 +2,7 @@
 require('dotenv').config();
 const { google }      = require('googleapis');
 const { GoogleGenAI } = require('@google/genai');
-const { getAuthClient } = require('./google_auth');
+const { getAuthClient, isAuthenticated } = require('./google_auth');
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
@@ -234,6 +234,13 @@ async function draftEmail({ to, subject, body }) {
 async function handleSendEmailTool({ recipient_name, subject, message_intent, draft_only }, speakFn, logFn) {
     const log = logFn   || ((msg) => console.log('[Gmail Tool]', msg));
     const say = speakFn || ((msg) => console.log('[Gmail TTS]', msg));
+
+    // Guard: never trigger the interactive OAuth browser flow inside the live session.
+    if (!isAuthenticated()) {
+        const msg = 'Gmail is not connected yet. Open a terminal in the robot-widget folder and run: npm run setup-google — it will open a browser to authorize access. After that, restart Nova and email will work.';
+        log('⚠️ [Gmail] Not authenticated — returning auth_required');
+        return { status: 'auth_required', speak: msg, message: msg };
+    }
 
     try {
         log(`📧 Resolving "${recipient_name}"...`);
