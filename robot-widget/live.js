@@ -281,6 +281,31 @@ async function startLiveSession(mainWindow, automation) {
                     "   - NEVER triggers for: questions about time zones, general scheduling advice, or anything that doesn't read/write the calendar\n" +
                     "   - After tool responds, speak the result naturally (e.g. 'You have 3 events tomorrow...')\n\n" +
 
+                    "8. code_agent — Activate for ANY request related to coding, building, or modifying a software project.\n" +
+                    "   ACTIVATION TRIGGERS: 'help me code', 'create a project', 'build a website', 'make an app', 'write code for',\n" +
+                    "   'let's code', 'I want to build', 'start a new project', 'build me a [anything]', 'code something',\n" +
+                    "   'make a Chrome extension', 'build an API', 'create a React app', 'help me program'\n" +
+                    "   MODIFICATION TRIGGERS (when a project session is active): 'change X', 'add a feature', 'fix the bug',\n" +
+                    "   'update the code', 'make it do X', 'add Y', 'remove Z', 'redesign the UI', 'add a route'\n" +
+                    "   END TRIGGERS: 'I\\'m done coding', 'done with the project', 'close the project', 'end coding session',\n" +
+                    "   'stop coding', 'that\\'s all for now'\n\n" +
+                    "   Actions and when to call each:\n" +
+                    "   - start_session: User first mentions wanting coding help — call this to activate code agent mode.\n" +
+                    "   - list_projects: User wants to see what projects exist on their Desktop.\n" +
+                    "   - create_project: User gives you a project name → always pass project_name.\n" +
+                    "   - open_project: User wants to open/continue an existing project by name → pass project_name.\n" +
+                    "   - generate_code: User has described what to build AND a project folder exists → pass project_type + description.\n" +
+                    "     project_type values: 'static_website' | 'react' | 'api_only' | 'fullstack' | 'cli' | 'extension' | 'python'\n" +
+                    "   - modify_code: Any change request when a coding session is active → pass instruction with full detail.\n" +
+                    "   - preview_project: User asks to see the project running in the browser.\n" +
+                    "   - end_session: User is done coding → closes browser, VS Code, servers.\n\n" +
+                    "   IMPORTANT RULES:\n" +
+                    "   - During an active coding session, ALL change requests → modify_code (even unrelated-seeming conversation).\n" +
+                    "   - After generate_code succeeds, automatically say what was built and describe the preview.\n" +
+                    "   - The browser shows the live preview — you can still use control_browser to navigate inside it.\n" +
+                    "   - Speak progress naturally: 'Generating your project…', 'Installing dependencies…', 'Starting the server…'\n" +
+                    "   - User may speak any language — always respond in their language; use English for tool parameter values.\n\n" +
+
                     "== LANGUAGE ==\n" +
                     "Always respond in the user's language. Tool parameter values must be in English.",
 
@@ -423,6 +448,39 @@ async function startLiveSession(mainWindow, automation) {
                                         event_id: {
                                             type: "STRING",
                                             description: "Event ID for delete_event. If omitted, Nova looks up the event by title."
+                                        }
+                                    },
+                                    required: ["action"]
+                                }
+                            },
+                            {
+                                name: "code_agent",
+                                description: "Nova Code Agent — creates, generates, previews, and modifies software projects. Triggers for any coding or project-building request: 'help me code', 'create a project', 'build a website', 'make an app', 'start a React project', 'write an API', etc. Also triggers for changes during an active session: 'change X', 'add Y', 'fix Z'. And for ending: 'I'm done coding'.",
+                                parameters: {
+                                    type: "OBJECT",
+                                    properties: {
+                                        action: {
+                                            type: "STRING",
+                                            enum: ["start_session", "list_projects", "create_project", "open_project",
+                                                   "generate_code", "modify_code", "preview_project", "end_session"],
+                                            description: "Code agent action to perform."
+                                        },
+                                        project_name: {
+                                            type: "STRING",
+                                            description: "Project name (for create_project or open_project)."
+                                        },
+                                        project_type: {
+                                            type: "STRING",
+                                            enum: ["static_website", "react", "api_only", "fullstack", "cli", "extension", "python"],
+                                            description: "Project technology type (required for generate_code)."
+                                        },
+                                        description: {
+                                            type: "STRING",
+                                            description: "Detailed description of what to build (for generate_code). Be thorough — include features, UI style, data model, etc."
+                                        },
+                                        instruction: {
+                                            type: "STRING",
+                                            description: "Specific change or modification instruction (for modify_code). Include context from the conversation."
                                         }
                                     },
                                     required: ["action"]
@@ -928,6 +986,68 @@ async function startLiveSession(mainWindow, automation) {
                                         console.error('📅 [Calendar] Unexpected error:', e.message);
                                         if (activeSession) {
                                             activeSession.sendRealtimeInput({ text: `[CALENDAR ERROR] ${e.message}. Tell the user there was a problem accessing their calendar.` });
+                                        }
+                                    });
+                                }
+
+                            } else if (call.name === 'code_agent') {
+                                const { action } = call.args;
+                                console.log(`💻 [Code Agent] action="${action}" project="${call.args.project_name || ''}" type="${call.args.project_type || ''}"`);
+
+                                // Acknowledge immediately so Nova speaks while work runs
+                                const ackMessages = {
+                                    start_session:   `Activating Nova Code Agent. Tell the user you are ready to help them code. Then wait for tool result.`,
+                                    list_projects:   `Scanning the Desktop for projects. Tell the user you are checking their Desktop, then wait.`,
+                                    create_project:  `Creating the project folder. Tell the user you are setting up the project right now.`,
+                                    open_project:    `Opening the project. Tell the user you are loading it in VS Code now.`,
+                                    generate_code:   `Generating the full project code with Gemini. Tell the user: "I'm building your project now — this might take a moment while I generate all the files and set everything up." Then stay quiet.`,
+                                    modify_code:     `Applying the code changes. Tell the user you are updating the code right now, then stay quiet briefly.`,
+                                    preview_project: `Opening the preview. Tell the user you are bringing up the browser preview.`,
+                                    end_session:     `Ending the coding session. Tell the user you are closing everything now.`,
+                                };
+
+                                activeSession.sendRealtimeInput({
+                                    functionResponses: [{
+                                        id: call.id,
+                                        response: {
+                                            status: "Processing",
+                                            message: ackMessages[action] || `Processing code agent action: ${action}. Acknowledge briefly.`,
+                                        }
+                                    }]
+                                });
+
+                                if (automationRef && automationRef.codeAgentTool) {
+                                    automationRef.codeAgentTool(call.args).then((result) => {
+                                        if (!activeSession) return;
+                                        const speakText = result.speak || 'Done.';
+
+                                        let prompt;
+                                        if (result.status === 'error') {
+                                            prompt = `[CODE AGENT ERROR] ${speakText} Tell the user what went wrong in a friendly way.`;
+                                        } else if (result.status === 'needs_info' || result.status === 'needs_type' || result.status === 'needs_project') {
+                                            prompt = `[CODE AGENT NEEDS INPUT] ${speakText} Ask the user for the missing information naturally.`;
+                                        } else if (result.status === 'success' || result.status === 'ready' || result.status === 'ok') {
+                                            prompt = `[CODE AGENT RESULT] ${speakText} Speak this to the user enthusiastically and naturally. ` +
+                                                (action === 'generate_code'
+                                                    ? 'Describe what was built and invite them to tell you what to change or add. Do NOT call any tool.'
+                                                    : action === 'modify_code'
+                                                    ? 'Confirm the change and ask if anything else needs adjusting. Do NOT call any tool.'
+                                                    : 'Do NOT call any tool.');
+                                        } else if (result.status === 'ended') {
+                                            prompt = `[CODE AGENT ENDED] ${speakText} Speak this naturally to the user and return to normal conversation mode.`;
+                                        } else {
+                                            prompt = `[CODE AGENT] ${speakText} Speak this naturally to the user. Do NOT call any tool.`;
+                                        }
+
+                                        try {
+                                            activeSession.sendRealtimeInput({ text: prompt });
+                                        } catch (e) {
+                                            console.error('💻 [Code Agent] Failed to inject result:', e.message);
+                                        }
+                                    }).catch((e) => {
+                                        console.error('💻 [Code Agent] Unexpected error:', e.message);
+                                        if (activeSession) {
+                                            activeSession.sendRealtimeInput({ text: `[CODE AGENT ERROR] ${e.message}. Tell the user there was a problem with the code agent.` });
                                         }
                                     });
                                 }

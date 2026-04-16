@@ -16,6 +16,7 @@ const { startLiveSession, sendAudioChunk, sendTextChunk, endLiveSession, setBrow
 const googleAuth                 = require('./google_auth');
 const { handleSendEmailTool }    = require('./gmail');
 const { handleCalendarActionTool } = require('./calendar');
+const codeAgent                  = require('./code_agent');
 
 // Terminate Chromium's Autoplay sandbox. We are a desktop app, not a website!
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -780,6 +781,15 @@ const Automation = {
             console.log('[Calendar Tool]', msg);
         };
         return await handleCalendarActionTool(args, logFn);
+    },
+
+    // ── Code Agent tool handler ───────────────────────────────────────────
+    codeAgentTool: async (args) => {
+        const logFn = (msg) => {
+            if (mainWindow) mainWindow.webContents.send('automation-log', msg);
+            console.log('[Code Agent]', msg);
+        };
+        return await handleCodeAgentTool(args, logFn);
     },
 };
 
@@ -2564,6 +2574,254 @@ ipcMain.handle('calendar-delete-event', async (event, { eventId }) => {
         return { success: false, error: e.message };
     }
 });
+
+// ── Code Agent Tool Handler ────────────────────────────────────────────────
+// Orchestrates the full coding session: project creation, generation, preview,
+// modification, and teardown.  Called by Automation.codeAgentTool from live.js.
+async function handleCodeAgentTool(args, logFn) {
+    const log = logFn || console.log;
+    const { action, project_name, project_type, description, instruction } = args;
+
+    // Helper: open/navigate Nova's browser to a local URL without going
+    // through the search fallback (openBrowser treats localhost as a query).
+    const openCodePreview = (url) => {
+        if (!browserWin) {
+            createBrowserWindow();
+            // browser-ready handler will send pendingBrowserUrl
+            pendingBrowserUrl = url;
+        } else {
+            if (isBrowserReady) browserWin.webContents.send('navigate', url);
+            else pendingBrowserUrl = url;
+        }
+        setBrowserOpen(true);
+    };
+
+    try {
+        switch (action) {
+
+            // ── start_session ──────────────────────────────────────────────
+            case 'start_session': {
+                const projects = codeAgent.listDesktopProjects();
+                codeAgent.setActive(true);
+                const list = projects.length
+                    ? `I found ${projects.length} project${projects.length > 1 ? 's' : ''} on your Desktop: ${projects.slice(0, 6).join(', ')}${projects.length > 6 ? '…' : ''}.`
+                    : 'Your Desktop has no project folders yet.';
+                return {
+                    status: 'ready',
+                    speak: `Nova Code Agent activated. ${list} What project would you like to work on? Give me a name and I'll create it or open an existing one.`,
+                    projects,
+                };
+            }
+
+            // ── list_projects ──────────────────────────────────────────────
+            case 'list_projects': {
+                const projects = codeAgent.listDesktopProjects();
+                return {
+                    status: 'ok',
+                    speak: projects.length
+                        ? `Here are the projects on your Desktop: ${projects.join(', ')}. Which one would you like to open, or shall I create something new?`
+                        : 'No project folders found on your Desktop. Tell me a name and I\'ll create one.',
+                    projects,
+                };
+            }
+
+            // ── create_project ─────────────────────────────────────────────
+            case 'create_project': {
+                if (!project_name) return { status: 'needs_info', speak: 'What would you like to name the project?' };
+
+                const projects = codeAgent.listDesktopProjects();
+                const match    = codeAgent.fuzzyMatchProject(project_name, projects);
+
+                if (match && match.score >= 80) {
+                    const existingPath = require('path').join(codeAgent.getDesktopPath(), match.name);
+                    codeAgent.setProject(match.name, null, existingPath);
+                    await codeAgent.openInVSCode(existingPath, log);
+                    return {
+                        status: 'opened_existing',
+                        speak: `Found "${match.name}" on your Desktop — I've opened it in VS Code. What type of project is this, and what would you like to build or change?`,
+                        projectPath: existingPath,
+                    };
+                }
+
+                const projectPath = codeAgent.createProjectFolder(project_name);
+                await codeAgent.openInVSCode(projectPath, log);
+                return {
+                    status: 'created',
+                    speak: `Created "${require('path').basename(projectPath)}" on your Desktop and opened VS Code. What type of project is this? Say: website, React app, API, full-stack, CLI tool, Chrome extension, or Python.`,
+                    projectPath,
+                };
+            }
+
+            // ── open_project ───────────────────────────────────────────────
+            case 'open_project': {
+                if (!project_name) return { status: 'needs_info', speak: 'Which project would you like to open?' };
+
+                const projects = codeAgent.listDesktopProjects();
+                const match    = codeAgent.fuzzyMatchProject(project_name, projects);
+                if (!match) {
+                    return {
+                        status: 'not_found',
+                        speak: `I couldn't find "${project_name}" on your Desktop. ${projects.length ? 'Available: ' + projects.join(', ') + '.' : 'No projects found.'} Want to create a new one?`,
+                    };
+                }
+
+                const existingPath = require('path').join(codeAgent.getDesktopPath(), match.name);
+                codeAgent.setProject(match.name, null, existingPath);
+                await codeAgent.openInVSCode(existingPath, log);
+                return {
+                    status: 'opened',
+                    speak: `Opened "${match.name}" in VS Code. What would you like to do with this project?`,
+                    projectPath: existingPath,
+                };
+            }
+
+            // ── generate_code ──────────────────────────────────────────────
+            case 'generate_code': {
+                const state = codeAgent.getState();
+                if (!state.projectPath) return { status: 'needs_project', speak: 'Tell me the project name first and I\'ll create it.' };
+                if (!project_type)      return { status: 'needs_type', speak: 'What type of project — website, React app, API, full-stack, CLI, Chrome extension, or Python?' };
+
+                const projDesc = description || `A professional ${project_type} project named ${state.projectName}`;
+
+                log(`⚙️ Generating "${state.projectName}" (${project_type})…`);
+
+                // Generate
+                const generated = await codeAgent.generateCode(state.projectName, project_type, projDesc, log);
+                codeAgent.setProject(state.projectName, project_type, state.projectPath);
+                codeAgent.writeProjectFiles(generated.files || [], log);
+                codeAgent.setEndpoints(generated.endpoints || []);
+
+                // Install dependencies
+                const needsNpm = ['react', 'api_only', 'fullstack', 'cli'].includes(project_type);
+                if (needsNpm && (generated.installCommand || '').includes('npm')) {
+                    log('📦 Installing dependencies…');
+                    if (project_type === 'fullstack') {
+                        const pFront = require('path').join(state.projectPath, 'frontend');
+                        const pBack  = require('path').join(state.projectPath, 'backend');
+                        if (fs.existsSync(pFront)) await codeAgent.installDependencies(pFront, log);
+                        if (fs.existsSync(pBack))  await codeAgent.installDependencies(pBack,  log);
+                    } else {
+                        await codeAgent.installDependencies(state.projectPath, log);
+                    }
+                }
+                if (project_type === 'python' && (generated.installCommand || '').includes('pip')) {
+                    exec(`pip install -r requirements.txt`, { cwd: state.projectPath }, () => {});
+                }
+
+                // Start server (skip for CLI / extension / bare python with no web)
+                const noServer = project_type === 'cli' || project_type === 'extension'
+                    || (project_type === 'python' && !generated.port);
+                let serverResult = { success: false, port: generated.port };
+
+                if (!noServer) {
+                    serverResult = await codeAgent.startDevServer(
+                        project_type, generated.devCommand, generated.port || null, log
+                    );
+                }
+
+                // Open browser preview
+                if (!noServer && serverResult.success) {
+                    if (project_type === 'api_only') {
+                        const html     = codeAgent.buildApiPreviewHtml(generated.endpoints || [], serverResult.port || generated.port);
+                        const prevPath = require('path').join(state.projectPath, '.nova_api_preview.html');
+                        fs.writeFileSync(prevPath, html, 'utf8');
+                        openCodePreview(`file://${prevPath}`);
+                    } else {
+                        const previewUrl = project_type === 'fullstack'
+                            ? `http://localhost:${serverResult.port}`
+                            : `http://localhost:${serverResult.port}`;
+                        openCodePreview(previewUrl);
+                    }
+                } else if (project_type === 'fullstack' && serverResult.apiPort) {
+                    // Show API explorer for full-stack even if frontend not ready
+                    const html     = codeAgent.buildApiPreviewHtml(generated.endpoints || [], serverResult.apiPort);
+                    const prevPath = require('path').join(state.projectPath, '.nova_api_preview.html');
+                    fs.writeFileSync(prevPath, html, 'utf8');
+                    openCodePreview(`file://${prevPath}`);
+                }
+
+                const typeLabel = { static_website:'website', react:'React app', api_only:'REST API',
+                    fullstack:'full-stack app', cli:'CLI tool', extension:'Chrome extension', python:'Python project' };
+                const filesN = (generated.files || []).length;
+
+                return {
+                    status: 'success',
+                    speak: noServer
+                        ? `Your ${typeLabel[project_type]} "${state.projectName}" is ready in VS Code — ${filesN} files generated. What would you like to add or change?`
+                        : project_type === 'api_only'
+                        ? `Your REST API "${state.projectName}" is live! I've opened the API Explorer — ${(generated.endpoints||[]).length} endpoints ready to test. What would you like to add?`
+                        : `Your ${typeLabel[project_type]} "${state.projectName}" is running! ${filesN} files generated. I've opened the preview in my browser. What should we change or add?`,
+                    filesGenerated: filesN,
+                    port: serverResult.port,
+                };
+            }
+
+            // ── modify_code ────────────────────────────────────────────────
+            case 'modify_code': {
+                const state = codeAgent.getState();
+                if (!state.projectPath) return { status: 'needs_project', speak: 'No active project. Say "start coding" to begin.' };
+                if (!instruction)       return { status: 'needs_info', speak: 'What changes would you like me to make?' };
+
+                const result = await codeAgent.modifyCode(instruction, log);
+
+                // Reload browser preview after hot-reload settles
+                if (state.serverPort) {
+                    await new Promise(r => setTimeout(r, 2000));
+                    if (browserWin && isBrowserReady) {
+                        if (state.projectType === 'api_only') {
+                            const html     = codeAgent.buildApiPreviewHtml(codeAgent.getEndpoints(), state.apiPort || state.serverPort);
+                            const prevPath = require('path').join(state.projectPath, '.nova_api_preview.html');
+                            fs.writeFileSync(prevPath, html, 'utf8');
+                            browserWin.webContents.send('navigate', `file://${prevPath}`);
+                        } else {
+                            browserWin.webContents.send('navigate', `http://localhost:${state.serverPort}`);
+                        }
+                    }
+                }
+
+                return {
+                    status: 'success',
+                    speak: `Done! ${result.summary || 'Changes applied'} — ${(result.changes || []).length} file${(result.changes||[]).length !== 1 ? 's' : ''} updated. How does it look? What else should we change?`,
+                };
+            }
+
+            // ── preview_project ────────────────────────────────────────────
+            case 'preview_project': {
+                const state = codeAgent.getState();
+                if (!state.projectPath) return { status: 'needs_project', speak: 'No active project to preview.' };
+
+                if (state.projectType === 'api_only' || (state.projectType === 'fullstack' && state.apiPort)) {
+                    const prevPath = require('path').join(state.projectPath, '.nova_api_preview.html');
+                    if (fs.existsSync(prevPath)) {
+                        openCodePreview(`file://${prevPath}`);
+                        return { status: 'ok', speak: 'Opening the API Explorer.' };
+                    }
+                }
+
+                const url = `http://localhost:${state.serverPort || 8080}`;
+                openCodePreview(url);
+                return { status: 'ok', speak: `Preview opened at localhost:${state.serverPort || 8080}.` };
+            }
+
+            // ── end_session ────────────────────────────────────────────────
+            case 'end_session': {
+                const name = codeAgent.getState().projectName || 'the project';
+                closeBrowser();
+                codeAgent.endSession();
+                return {
+                    status: 'ended',
+                    speak: `Coding session for "${name}" wrapped up. VS Code, servers, and the preview are all closed. Let me know what else you need!`,
+                };
+            }
+
+            default:
+                return { status: 'unknown', speak: `Unknown code agent action: ${action}` };
+        }
+    } catch (e) {
+        console.error('[Code Agent] Tool error:', e.message, e.stack);
+        return { status: 'error', speak: `Something went wrong in the code agent: ${e.message}` };
+    }
+}
 
 app.whenReady().then(() => {
     // Wire shell.openExternal into Google OAuth so consent flows open in the default browser
