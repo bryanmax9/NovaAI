@@ -1,3 +1,9 @@
+// Force X11 backend on Linux so alwaysOnTop, window-type hints, and
+// transparent overlays work correctly (Wayland breaks all three).
+if (process.platform === 'linux') {
+    process.env.ELECTRON_OZONE_PLATFORM_HINT = process.env.ELECTRON_OZONE_PLATFORM_HINT || 'x11';
+}
+
 const { app, BrowserWindow, screen, protocol, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');

@@ -4,7 +4,7 @@
   "description": "Sci-fi worker robot desktop widget",
   "main": "main.js",
   "scripts": {
-    "start": "electron . --no-sandbox --disable-gpu-sandbox --enable-transparent-visuals --enable-logging",
+    "start": "electron . --no-sandbox --disable-gpu-sandbox --enable-transparent-visuals --enable-logging --ozone-platform=x11",
     "setup-google": "node scripts/setup_google_auth.js"
   },
   "dependencies": {
