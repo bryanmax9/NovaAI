@@ -14,12 +14,27 @@ let _lastBrowserActionAt = 0;        // Timestamp of last open/scroll/close acti
 let _lastSmartClickAt = 0;           // Separate clock for smart_click — must not be gated by 'open'
 let _lastOpenAt = 0;                 // When the last 'open' fired — smart_click waits if too recent
 let _lastOpenedQuery = '';           // Last opened query — blocks re-opening the same URL within 8s
+let _lastExplicitCloseAt = 0;        // When the user last explicitly said "close browser"
+const POST_CLOSE_LOCKOUT_MS = 10000; // Block any open/search for 10s after explicit close
 let _storeAssistantActive = false;   // True while user is on a known store — tells smart_click to follow up with get_browser_state
 let _lastAutoScanAt = 0;             // Timestamp of last auto-scan inject — blocks redundant get_browser_state calls
 let _lastGetBrowserStateAt = 0;      // Cooldown for get_browser_state calls to stop looping
 let _lastAutoScanUrl = '';           // URL seen in the most recent auto-scan — for stuck-navigation detection
 let _stuckClickCount = 0;            // How many consecutive auto-scans landed on the same URL after smart_click
 let _lastSmartClickTarget = '';      // target_text of the most recent smart_click — used in fallback message
+const _calendarDebounce = new Map(); // calKey → last-call timestamp, prevents Gemini from looping tool calls
+const CALENDAR_DEBOUNCE_MS = 12000;  // Ignore duplicate calendar calls within 12s
+const _codeAgentDebounce = new Map(); // action → last-call timestamp
+const CODE_AGENT_DEBOUNCE_MS = {
+    generate_code:  120000,  // generation takes 30-60s — block for 2 minutes
+    modify_code:     60000,  // modification takes ~20s — block for 1 minute
+    create_project:  15000,
+    open_project:    10000,
+    list_projects:   10000,
+    preview_project: 10000,
+    start_session:   10000,
+    end_session:     10000,
+};
 
 // ── STORE AUTO-SCAN ────────────────────────────────────────────────────────
 // Shared helper used after both smart_click and open (in store mode).
@@ -130,6 +145,7 @@ async function startLiveSession(mainWindow, automation) {
     _lastBrowserActionAt = 0;
     _lastSmartClickAt = 0;
     _lastOpenAt = 0;
+    _lastExplicitCloseAt = 0;
     _lastOpenedQuery = '';
     _storeAssistantActive = false;
     _lastAutoScanAt = 0;
@@ -137,6 +153,7 @@ async function startLiveSession(mainWindow, automation) {
     _lastAutoScanUrl = '';
     _stuckClickCount = 0;
     _lastSmartClickTarget = '';
+    _codeAgentDebounce.clear();
     if (activeSession) {
         console.log('Live Session already active.');
         return;
@@ -274,12 +291,14 @@ async function startLiveSession(mainWindow, automation) {
                     "   - After the tool responds, speak the confirmation: 'Email sent to [name]' or ask for clarification if needed\n\n" +
 
                     "7. calendar_action — ONLY for explicit calendar operations: checking schedule, creating events, cancelling events, checking availability.\n" +
-                    "   - get_events triggers: 'what's on my calendar tomorrow', 'what do I have this week', 'what's my next meeting'\n" +
+                    "   - get_events triggers: 'what's on my calendar', 'what do I have this week', 'what's my schedule', 'what's my next meeting'\n" +
+                    "   - DEFAULT time_expression for get_events: always use 'this week' unless the user specifies a different day or week.\n" +
+                    "   - Only use a different week/range if the user explicitly asks (e.g. 'next week', 'last week', 'on Friday', 'tomorrow').\n" +
                     "   - create_event triggers: 'block 2pm for deep work', 'schedule a call with Bryan on Monday at 10am', 'add gym at 6pm'\n" +
                     "   - delete_event triggers: 'cancel my 4pm today', 'remove the standup tomorrow'\n" +
                     "   - check_availability triggers: 'am I free at 10am', 'when am I free Friday afternoon'\n" +
                     "   - NEVER triggers for: questions about time zones, general scheduling advice, or anything that doesn't read/write the calendar\n" +
-                    "   - After tool responds, speak the result naturally (e.g. 'You have 3 events tomorrow...')\n\n" +
+                    "   - After tool responds, speak the result naturally. Do NOT call calendar_action again.\n\n" +
 
                     "8. code_agent — Activate for ANY request related to coding, building, or modifying a software project.\n" +
                     "   ACTIVATION TRIGGERS: 'help me code', 'create a project', 'build a website', 'make an app', 'write code for',\n" +
@@ -712,6 +731,17 @@ async function startLiveSession(mainWindow, automation) {
 
                                 if (automationRef) {
                                     if (action === 'open') {
+                                        // Post-close lockout: block re-opening for 10s after user explicitly closed browser.
+                                        const msSinceClose = nowBrowser - _lastExplicitCloseAt;
+                                        if (msSinceClose < POST_CLOSE_LOCKOUT_MS) {
+                                            console.log(`🛡️ open blocked — browser was just closed ${Math.round(msSinceClose/1000)}s ago.`);
+                                            activeSession.sendRealtimeInput({
+                                                functionResponses: [{ id: call.id, response: { status: "Blocked", message: "The user just closed the browser. Do NOT reopen it. Resume normal conversation." } }]
+                                            });
+                                            try { activeSession.sendRealtimeInput({ text: "[BROWSER CLOSED] The user explicitly closed the browser. Do not open it again unless they ask. Just talk to them normally." }); } catch (_) {}
+                                            return;
+                                        }
+
                                         // Deduplicate: skip re-opening the exact same query within 8s.
                                         // Gemini sometimes sends the same open command twice because
                                         // it gets two audio segments for a single user utterance.
@@ -735,6 +765,17 @@ async function startLiveSession(mainWindow, automation) {
                                             console.log(`🛡️ open skipped — same query "${normalizedQuery}" opened within 8s.`);
                                         }
                                     } else if (action === 'search_youtube') {
+                                        // Post-close lockout: same guard as 'open'
+                                        const msSinceClose = nowBrowser - _lastExplicitCloseAt;
+                                        if (msSinceClose < POST_CLOSE_LOCKOUT_MS) {
+                                            console.log(`🛡️ search_youtube blocked — browser was just closed ${Math.round(msSinceClose/1000)}s ago.`);
+                                            activeSession.sendRealtimeInput({
+                                                functionResponses: [{ id: call.id, response: { status: "Blocked", message: "The user just closed the browser. Do NOT reopen it. Resume normal conversation." } }]
+                                            });
+                                            try { activeSession.sendRealtimeInput({ text: "[BROWSER CLOSED] The user explicitly closed the browser. Do not open it again unless they ask. Just talk to them normally." }); } catch (_) {}
+                                            return;
+                                        }
+
                                         automationRef.openBrowser({ platform: 'youtube', query });
                                         _lastOpenAt = nowBrowser;
                                         _lastOpenedQuery = (query || '').toLowerCase().trim();
@@ -777,6 +818,8 @@ async function startLiveSession(mainWindow, automation) {
                                         } else {
                                             automationRef.closeBrowser();
                                             _browserIsOpen = false;
+                                            _lastExplicitCloseAt = nowBrowser;
+                                            _storeAssistantActive = false;
                                         }
                                     }
                                 }
@@ -784,8 +827,12 @@ async function startLiveSession(mainWindow, automation) {
                                 // In store assistant mode the page auto-scan fires automatically
                                 // — tell Gemini to stay quiet and wait for it.
                                 const isStoreNav = _storeAssistantActive && (action === 'smart_click' || action === 'open');
+                                // For close: the functionResponse message alone is enough — a 400ms delayed
+                                // text injection follows to guarantee Nova speaks the confirmation aloud.
                                 const clickMessage = isStoreNav
                                     ? `Navigating to the product page. Stay quiet — a page scan will arrive shortly with instructions. Do NOT speak yet.`
+                                    : action === 'close'
+                                    ? `Browser closed successfully. Say out loud: "Done, browser closed." Do NOT call any tool again.`
                                     : `Browser ${action} performed. Confirm this to the user in one short sentence, then continue conversation normally.`;
 
                                 activeSession.sendRealtimeInput({
@@ -797,6 +844,18 @@ async function startLiveSession(mainWindow, automation) {
                                         }
                                     }]
                                 });
+
+                                // For close: add a 400ms delayed text injection so Nova says something.
+                                // Sending text and functionResponse in the same tick causes Gemini to
+                                // generate no audio output — the delay prevents that race condition.
+                                if (action === 'close' && _lastExplicitCloseAt === nowBrowser) {
+                                    setTimeout(() => {
+                                        if (!activeSession) return;
+                                        try {
+                                            activeSession.sendRealtimeInput({ text: 'Say out loud right now: "Done, browser closed." — Do NOT call any tool.' });
+                                        } catch (_) {}
+                                    }, 400);
+                                }
 
                             } else if (call.name === 'execute_system_command') {
                                 const command = call.args.command;
@@ -949,83 +1008,190 @@ async function startLiveSession(mainWindow, automation) {
 
                             } else if (call.name === 'calendar_action') {
                                 const { action } = call.args;
+                                const calKey = `${action}:${call.args.time_expression || ''}:${call.args.event_title || ''}`;
+                                const nowCal = Date.now();
+
+                                // Debounce: block the same action+args within 12s
+                                if (nowCal - (_calendarDebounce.get(calKey) || 0) < CALENDAR_DEBOUNCE_MS) {
+                                    console.log(`📅 [Calendar] Debounced duplicate call: ${calKey}`);
+                                    try {
+                                        activeSession.sendRealtimeInput({
+                                            functionResponses: [{ id: call.id, response: {
+                                                status: 'already_done',
+                                                message: 'This calendar action was just completed. Tell the user the result you already have. Do NOT call calendar_action again.'
+                                            }}]
+                                        });
+                                    } catch (_) {}
+                                    return;
+                                }
+                                _calendarDebounce.set(calKey, nowCal);
+
                                 console.log(`📅 [Calendar Tool] action="${action}" time="${call.args.time_expression || ''}"`);
 
-                                // Acknowledge so Nova can say something while fetching
+                                // STEP 1 — Acknowledge immediately so Nova speaks right away.
+                                // This is the same pattern as code_agent: send a "Processing"
+                                // functionResponse now so Gemini can say something while we wait
+                                // for the Google Calendar API (which takes 2-3+ seconds).
+                                // The tool call is considered "complete" by this response; the
+                                // actual result is delivered via a plain text injection after.
                                 const ackMsg = action === 'get_events'
-                                    ? `Checking your calendar right now. Tell the user you are looking at their schedule, then wait for the data.`
+                                    ? `Say out loud right now: "Give me just a moment, I'm pulling up your calendar." Do NOT call calendar_action again.`
                                     : action === 'create_event'
-                                    ? `Creating the event. Tell the user you are adding it to their calendar now.`
+                                    ? `Say out loud right now: "On it — adding that to your calendar right now." Do NOT call calendar_action again.`
                                     : action === 'delete_event'
-                                    ? `Looking up the event to cancel. Tell the user you are checking your calendar now.`
-                                    : `Checking your calendar availability. Tell the user you are looking at their schedule.`;
+                                    ? `Say out loud right now: "Sure, removing that from your calendar." Do NOT call calendar_action again.`
+                                    : action === 'check_availability'
+                                    ? `Say out loud right now: "Let me check if that time is free for you." Do NOT call calendar_action again.`
+                                    : `Say out loud right now that you are processing the calendar request. Do NOT call calendar_action again.`;
 
-                                activeSession.sendRealtimeInput({
-                                    functionResponses: [{
-                                        id: call.id,
-                                        response: { status: "Processing", message: ackMsg }
-                                    }]
-                                });
+                                try {
+                                    activeSession.sendRealtimeInput({
+                                        functionResponses: [{
+                                            id: call.id,
+                                            response: { status: 'ok', message: ackMsg }
+                                        }]
+                                    });
+                                } catch (_) {}
 
-                                // Run async
+                                // Show loading badge on the widget
+                                if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+                                    mainWindowRef.webContents.send('show-status-message', 'Checking your calendar...');
+                                }
+
+                                // STEP 2 — Run the real API call. When done, inject the result
+                                // as plain text — NOT another functionResponse (tool call is
+                                // already closed). This is exactly how code_agent delivers results.
                                 if (automationRef && automationRef.calendarActionTool) {
                                     automationRef.calendarActionTool(call.args).then((result) => {
                                         if (!activeSession) return;
                                         const speakText = result.speak || result.message || 'Calendar action complete.';
-                                        const instr = result.status === 'auth_required'
-                                            ? `[CALENDAR AUTH REQUIRED] ${speakText} Tell the user they need to authorize Google Calendar by running npm run setup-google.`
-                                            : result.status === 'error' || result.status === 'not_found'
-                                            ? `[CALENDAR ERROR] ${speakText} Tell the user what went wrong.`
-                                            : `[CALENDAR RESULT] ${speakText} Speak this to the user now in a natural, conversational way. Do NOT call any tool.`;
+
+                                        // Clear loading badge
+                                        if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+                                            mainWindowRef.webContents.send('show-status-message', '');
+                                        }
+
+                                        // Deliver result as text injection (tool call already closed above)
+                                        let resultPrompt;
+                                        if (result.status === 'auth_required') {
+                                            resultPrompt = `[CALENDAR AUTH NEEDED] ${speakText} Tell the user they need to authorize Google Calendar.`;
+                                        } else if (result.status === 'error' || result.status === 'not_found') {
+                                            resultPrompt = `[CALENDAR ERROR] ${speakText} Tell the user what went wrong naturally. Do NOT call any tool.`;
+                                        } else {
+                                            resultPrompt = `[CALENDAR RESULT] ${speakText} Say this out loud naturally to the user now. Do NOT call any tool.`;
+                                        }
+
                                         try {
-                                            activeSession.sendRealtimeInput({ text: instr });
+                                            activeSession.sendRealtimeInput({ text: resultPrompt });
                                         } catch (e) {
-                                            console.error('📅 [Calendar] Failed to inject result:', e.message);
+                                            console.error('📅 [Calendar] Failed to deliver result:', e.message);
+                                        }
+
+                                        // Forward events to the calendar visual panel
+                                        if (automationRef && automationRef.showCalendarPanel) {
+                                            automationRef.showCalendarPanel({
+                                                action,
+                                                events: result.events || [],
+                                                timeExpression: call.args.time_expression || 'this week',
+                                                statusMessage: speakText,
+                                            });
                                         }
                                     }).catch((e) => {
                                         console.error('📅 [Calendar] Unexpected error:', e.message);
+                                        if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+                                            mainWindowRef.webContents.send('show-status-message', '');
+                                        }
                                         if (activeSession) {
-                                            activeSession.sendRealtimeInput({ text: `[CALENDAR ERROR] ${e.message}. Tell the user there was a problem accessing their calendar.` });
+                                            try {
+                                                activeSession.sendRealtimeInput({ text: `[CALENDAR ERROR] ${e.message}. Tell the user there was a problem with their calendar. Do NOT call any tool.` });
+                                            } catch (_) {}
                                         }
                                     });
                                 }
 
                             } else if (call.name === 'code_agent') {
                                 const { action } = call.args;
+                                const codeKey = `${action}:${call.args.project_name || ''}`;
+                                const nowCode = Date.now();
+                                const codeCooldown = CODE_AGENT_DEBOUNCE_MS[action] || 15000;
+
+                                // Debounce: block duplicate code_agent calls.
+                                // generate_code is blocked for 2 minutes since generation is slow.
+                                if (nowCode - (_codeAgentDebounce.get(codeKey) || 0) < codeCooldown) {
+                                    console.log(`💻 [Code Agent] Debounced duplicate: ${codeKey}`);
+                                    try {
+                                        activeSession.sendRealtimeInput({
+                                            functionResponses: [{ id: call.id, response: {
+                                                status: 'already_running',
+                                                message: 'This code agent action is already in progress. Tell the user to wait — do NOT call code_agent again.'
+                                            }}]
+                                        });
+                                    } catch (_) {}
+                                    return;
+                                }
+                                _codeAgentDebounce.set(codeKey, nowCode);
+
                                 console.log(`💻 [Code Agent] action="${action}" project="${call.args.project_name || ''}" type="${call.args.project_type || ''}"`);
 
-                                // Acknowledge immediately so Nova speaks while work runs
+                                // Show status badge on widget
+                                const statusLabels = {
+                                    generate_code:  'Building project...',
+                                    modify_code:    'Updating code...',
+                                    create_project: 'Creating project...',
+                                    open_project:   'Opening project...',
+                                    list_projects:  'Scanning projects...',
+                                    preview_project:'Opening preview...',
+                                    start_session:  'Starting code mode...',
+                                    end_session:    'Closing code session...',
+                                };
+                                if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+                                    mainWindowRef.webContents.send('show-status-message', statusLabels[action] || 'Working...');
+                                }
+
+                                // Acknowledge immediately so Nova speaks right away while work runs.
+                                // Same two-step pattern as calendar_action.
                                 const ackMessages = {
-                                    start_session:   `Activating Nova Code Agent. Tell the user you are ready to help them code. Then wait for tool result.`,
-                                    list_projects:   `Scanning the Desktop for projects. Tell the user you are checking their Desktop, then wait.`,
-                                    create_project:  `Creating the project folder. Tell the user you are setting up the project right now.`,
-                                    open_project:    `Opening the project. Tell the user you are loading it in VS Code now.`,
-                                    generate_code:   `Generating the full project code with Gemini. Tell the user: "I'm building your project now — this might take a moment while I generate all the files and set everything up." Then stay quiet.`,
-                                    modify_code:     `Applying the code changes. Tell the user you are updating the code right now, then stay quiet briefly.`,
-                                    preview_project: `Opening the preview. Tell the user you are bringing up the browser preview.`,
-                                    end_session:     `Ending the coding session. Tell the user you are closing everything now.`,
+                                    start_session:   `Nova Code Agent is now active. Say out loud: "Code mode activated — what are we building today?" Do NOT call code_agent again.`,
+                                    list_projects:   `Say out loud: "Let me check what projects you have on your Desktop." Do NOT call code_agent again.`,
+                                    create_project:  `Say out loud: "Creating your project folder right now." Do NOT call code_agent again.`,
+                                    open_project:    `Say out loud: "Opening your project in VS Code now." Do NOT call code_agent again.`,
+                                    generate_code:   `Say out loud right now: "I'm generating your project — this will take about a minute, I'll let you know when it's ready." Do NOT call code_agent again.`,
+                                    modify_code:     `Say out loud right now: "Applying your changes now, just a moment." Do NOT call code_agent again.`,
+                                    preview_project: `Say out loud: "Opening the browser preview for you." Do NOT call code_agent again.`,
+                                    end_session:     `Say out loud: "Wrapping up the coding session, closing everything now." Do NOT call code_agent again.`,
                                 };
 
-                                activeSession.sendRealtimeInput({
-                                    functionResponses: [{
-                                        id: call.id,
-                                        response: {
-                                            status: "Processing",
-                                            message: ackMessages[action] || `Processing code agent action: ${action}. Acknowledge briefly.`,
-                                        }
-                                    }]
-                                });
+                                try {
+                                    activeSession.sendRealtimeInput({
+                                        functionResponses: [{
+                                            id: call.id,
+                                            response: {
+                                                status: 'ok',
+                                                message: ackMessages[action] || `Acknowledged. Say briefly what you are doing for action: ${action}. Do NOT call code_agent again.`,
+                                            }
+                                        }]
+                                    });
+                                } catch (_) {}
 
                                 if (automationRef && automationRef.codeAgentTool) {
                                     automationRef.codeAgentTool(call.args).then((result) => {
                                         if (!activeSession) return;
                                         const speakText = result.speak || 'Done.';
 
+                                        // Clear status badge
+                                        if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+                                            mainWindowRef.webContents.send('show-status-message', '');
+                                        }
+
+                                        // Delay before speaking result to avoid collision with
+                                        // browser navigation events opening the preview simultaneously.
+                                        const resultDelay = (action === 'generate_code' || action === 'modify_code') ? 1800 : 0;
+
                                         let prompt;
                                         if (result.status === 'error') {
-                                            prompt = `[CODE AGENT ERROR] ${speakText} Tell the user what went wrong in a friendly way.`;
+                                            prompt = `[CODE AGENT ERROR] ${speakText} Tell the user what went wrong in a friendly way. Do NOT call any tool.`;
                                         } else if (result.status === 'needs_info' || result.status === 'needs_type' || result.status === 'needs_project') {
-                                            prompt = `[CODE AGENT NEEDS INPUT] ${speakText} Ask the user for the missing information naturally.`;
+                                            prompt = `[CODE AGENT NEEDS INPUT] ${speakText} Ask the user for the missing information naturally. Do NOT call any tool.`;
                                         } else if (result.status === 'success' || result.status === 'ready' || result.status === 'ok') {
                                             prompt = `[CODE AGENT RESULT] ${speakText} Speak this to the user enthusiastically and naturally. ` +
                                                 (action === 'generate_code'
@@ -1034,20 +1200,33 @@ async function startLiveSession(mainWindow, automation) {
                                                     ? 'Confirm the change and ask if anything else needs adjusting. Do NOT call any tool.'
                                                     : 'Do NOT call any tool.');
                                         } else if (result.status === 'ended') {
-                                            prompt = `[CODE AGENT ENDED] ${speakText} Speak this naturally to the user and return to normal conversation mode.`;
+                                            prompt = `[CODE AGENT ENDED] ${speakText} Speak this naturally to the user and return to normal conversation mode. Do NOT call any tool.`;
                                         } else {
                                             prompt = `[CODE AGENT] ${speakText} Speak this naturally to the user. Do NOT call any tool.`;
                                         }
 
-                                        try {
-                                            activeSession.sendRealtimeInput({ text: prompt });
-                                        } catch (e) {
-                                            console.error('💻 [Code Agent] Failed to inject result:', e.message);
+                                        const injectResult = () => {
+                                            if (!activeSession) return;
+                                            try {
+                                                activeSession.sendRealtimeInput({ text: prompt });
+                                            } catch (e) {
+                                                console.error('💻 [Code Agent] Failed to inject result:', e.message);
+                                            }
+                                        };
+                                        if (resultDelay > 0) {
+                                            setTimeout(injectResult, resultDelay);
+                                        } else {
+                                            injectResult();
                                         }
                                     }).catch((e) => {
                                         console.error('💻 [Code Agent] Unexpected error:', e.message);
+                                        if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+                                            mainWindowRef.webContents.send('show-status-message', '');
+                                        }
                                         if (activeSession) {
-                                            activeSession.sendRealtimeInput({ text: `[CODE AGENT ERROR] ${e.message}. Tell the user there was a problem with the code agent.` });
+                                            try {
+                                                activeSession.sendRealtimeInput({ text: `[CODE AGENT ERROR] ${e.message}. Tell the user there was a problem with the code agent. Do NOT call any tool.` });
+                                            } catch (_) {}
                                         }
                                     });
                                 }

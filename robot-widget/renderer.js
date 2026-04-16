@@ -24,7 +24,9 @@ window.novaState = {
     lastDirectCommandTime: 0,
     lastDirectCommandText: '',
     isResearching: false,
-    researchJustCompleted: 0
+    researchJustCompleted: 0,
+    isInResearchPaperMode: false,  // True while a research paper is open — Nova stays as paper guide
+    lastResearchTopic: null        // Topic of the last completed paper (for context re-injection)
 };
 
 window.novaVoice = {
@@ -512,9 +514,34 @@ function hideResearchOverlay() {
     }
 }
 
+/**
+ * After a Live session starts (or restarts), re-inject research paper context
+ * so Gemini doesn't forget the paper mid-conversation.
+ * Called with a delay to let the session fully connect before injecting.
+ */
+function injectPaperContextIfNeeded(delayMs = 3500) {
+    if (!window.novaState.isInResearchPaperMode) return;
+    const topic = window.novaState.lastResearchTopic || 'the research paper';
+    setTimeout(() => {
+        if (!window.novaState.isInResearchPaperMode) return;
+        if (!window.novaState.isLiveActive) return;
+        ipcRenderer.send('live-text-chunk',
+            `[PAPER OPEN — RESEARCH MODE ACTIVE] ` +
+            `A research paper on "${topic}" is currently open in Nova's browser. ` +
+            `You are in RESEARCH PAPER MODE. ` +
+            `Your ONLY job right now is to answer questions about this paper: its content, findings, sources, methodology, citations, conclusions, and summary. ` +
+            `Do NOT deviate to other topics. Do NOT say you don't have access to the paper — you wrote it. ` +
+            `Keep the browser open. Do NOT call any tools. ` +
+            `STAY in Research Paper Mode until the user explicitly says "close the browser" or "close the paper".`
+        );
+        uiLog(`📄 [Research Mode] Context re-injected for "${topic}"`);
+    }, delayMs);
+}
+
 // IPC: Research paper lifecycle events
 ipcRenderer.on('research-paper-started', (event, { topic }) => {
     window.novaState.isResearching = true;
+    window.novaState.lastResearchTopic = topic; // remember for context injection on session restart
     stopAllPlayback();
     showResearchOverlay(topic);
     listeningSymbol.style.display = 'none';
@@ -541,22 +568,34 @@ ipcRenderer.on('research-paper-done', (event, data) => {
 
     if (data.success) {
         const name = data.fileName || 'the research paper';
+        const topic = window.novaState.lastResearchTopic || name;
         uiLog(`✅ Research paper saved: ${name}`);
+
+        // Mark Nova as being in research paper mode — survives session restarts
+        window.novaState.isInResearchPaperMode = true;
+
         // Route through Gemini Live if active so the conversation pipeline stays alive.
         // Small delay lets the audio gate (isResearching=false) open before we send.
         setTimeout(() => {
             if (window.novaState.isLiveActive) {
-                // Inject as text input — Gemini Live will reply vocally and naturally
+                // Put Nova into research paper Q&A mode — stay until user closes browser
                 ipcRenderer.send('live-text-chunk',
-                    `[PAPER DONE] Research paper "${name}" is complete and saved on the desktop. Tell the user in one sentence their paper is ready to read, then ask what else they need. Do NOT call any tools. Do NOT close anything. Just speak.`
+                    `[PAPER DONE] Research paper "${name}" is complete and now displaying in Nova's browser. ` +
+                    `Announce to the user that their paper is ready. ` +
+                    `Then enter RESEARCH PAPER MODE: you are now the expert guide for this paper on "${topic}". ` +
+                    `Answer any questions about the paper's content, findings, sources, methodology, citations, or summary. ` +
+                    `STAY in Research Paper Mode and keep the browser open. ` +
+                    `Do NOT close the browser. Do NOT call any tools. ` +
+                    `Only exit this mode when the user explicitly says "close the browser" or "close the paper".`
                 );
             } else {
                 // Live session timed out during the long research — restart it then speak
-                speak(`Research paper complete. It has been saved to your desktop and opened in my browser. I am ready to help with anything else.`);
+                speak(`Research paper complete. It's now open in my browser. Feel free to ask me anything about it.`);
                 // Restart Gemini Live so future voice commands still work
                 setTimeout(() => {
                     ipcRenderer.send('live-start');
                     uiLog('🔄 Restarting Gemini Live after research completion.');
+                    injectPaperContextIfNeeded(3500);
                 }, 1500);
             }
         }, 600);
@@ -564,6 +603,35 @@ ipcRenderer.on('research-paper-done', (event, data) => {
         uiLog(`❌ Research paper failed: ${data.error || 'Unknown error'}`);
         speak(`I ran into a problem generating the research paper. Please try again.`);
     }
+});
+
+// Show/hide a small status badge below the Nova widget during async tool fetches
+// (e.g. "Checking your calendar..." while the Google Calendar API call runs).
+const _statusBadge = document.getElementById('nova-status-badge');
+ipcRenderer.on('show-status-message', (_e, msg) => {
+    if (!_statusBadge) return;
+    if (msg) {
+        _statusBadge.textContent = msg;
+        _statusBadge.style.display = 'flex';
+    } else {
+        _statusBadge.style.display = 'none';
+        _statusBadge.textContent = '';
+    }
+});
+
+// When the browser window is closed (by user clicking X or via voice command),
+// exit research paper mode so context is no longer injected on reconnect.
+ipcRenderer.on('browser-window-closed', () => {
+    if (window.novaState.isInResearchPaperMode) {
+        window.novaState.isInResearchPaperMode = false;
+        uiLog('📄 Research Paper Mode ended (browser closed)');
+    }
+});
+
+// Calendar panel is in its own floating window (calendar_panel.html).
+// Log events for debugging when the panel window opens.
+ipcRenderer.on('calendar-events', (event, { events, timeExpression }) => {
+    uiLog(`📅 Calendar panel: ${(events || []).length} event(s) for "${timeExpression || 'today'}"`);
 });
 
 async function analyzeScreen(userText) {
@@ -660,6 +728,9 @@ async function initOfflineVoice() {
 
             // Notify backend wrapper to open ai.live.connect WebSockets!
             ipcRenderer.send('live-start');
+
+            // If a research paper is still open, re-inject context once the session connects
+            injectPaperContextIfNeeded(3500);
 
             // Deliver any pending store greeting (queued while Nova was asleep)
             if (window._pendingStoreGreeting) {
@@ -977,6 +1048,8 @@ async function initOfflineVoice() {
                     setTimeout(() => {
                         if (window.novaState.isAwake && !window.novaState.isLiveActive) {
                             ipcRenderer.send('live-start');
+                            // Re-inject paper context after the new session connects
+                            injectPaperContextIfNeeded(4000);
                         }
                     }, 2000);
                 }
@@ -1429,9 +1502,11 @@ async function processCommand(cmd) {
     }
 
     // 2. Browser Window Management (Close)
-    if (normalized.match(/\b(close|exit|terminate|hide)\b.*?\b(browser|window|nova browser)\b/i)) {
+    if (normalized.match(/\b(close|exit|terminate|hide)\b.*?\b(browser|window|nova browser|paper|research)\b/i)) {
         uiLog("🌐 Closing Nova Browser...");
         ipcRenderer.send('browser-close');
+        // Exit research paper mode — no more context injections
+        window.novaState.isInResearchPaperMode = false;
         window.novaState.isProcessingCommand = false;
         return;
     }

@@ -186,6 +186,56 @@
       }
     }
 
+    /* ── Status badge (shown during async tool fetches) ── */
+    #nova-status-badge {
+      position: absolute;
+      bottom: 4px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 9px;
+      font-weight: 600;
+      color: rgba(0, 245, 210, 1.0);
+      background: rgba(3, 10, 22, 0.92);
+      border: 1px solid rgba(0, 200, 175, 0.45);
+      border-radius: 20px;
+      padding: 3px 9px 3px 6px;
+      white-space: nowrap;
+      pointer-events: none;
+      display: none;
+      align-items: center;
+      gap: 5px;
+      letter-spacing: 0.35px;
+      z-index: 10;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      box-shadow:
+        0 2px 16px rgba(0, 0, 0, 0.70),
+        0 0 10px rgba(0, 200, 175, 0.12),
+        inset 0 1px 0 rgba(255, 255, 255, 0.05);
+      animation: badge-in 0.22s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+    }
+    /* Animated dot indicator */
+    #nova-status-badge::before {
+      content: '';
+      display: inline-block;
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: rgba(0, 245, 210, 0.95);
+      box-shadow: 0 0 6px rgba(0, 245, 210, 0.8);
+      flex-shrink: 0;
+      animation: dot-breathe 1.0s ease-in-out infinite;
+    }
+    @keyframes badge-in {
+      from { opacity: 0; transform: translateX(-50%) translateY(4px) scale(0.92); }
+      to   { opacity: 1; transform: translateX(-50%) translateY(0)   scale(1.00); }
+    }
+    @keyframes dot-breathe {
+      0%, 100% { opacity: 1;    transform: scale(1.0); }
+      50%       { opacity: 0.35; transform: scale(0.65); }
+    }
+
     /* ════════  STATE OVERRIDES  ════════ */
 
     /* -- LISTENING -- */
@@ -240,6 +290,7 @@
       <span></span><span></span><span></span>
       <span></span><span></span><span></span>
     </div>
+    <div id="nova-status-badge"></div>
   </div>
 
   <script src="./node_modules/vosk-browser/dist/vosk.js"></script>

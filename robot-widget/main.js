@@ -359,6 +359,7 @@ function createChatWindow() {
 let browserWin = null;
 let isBrowserReady = false;
 let pendingBrowserUrl = null;
+let calendarWin = null;
 
 ipcMain.on('browser-ready', () => {
     console.log('📡 Bridge: Browser Agent is ready.');
@@ -783,6 +784,67 @@ const Automation = {
         return await handleCalendarActionTool(args, logFn);
     },
 
+    // ── Calendar visual panel (separate floating window) ─────────────────
+    showCalendarPanel: (data) => {
+        const CAL_W = 320;
+        const CAL_H = 480;
+        const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
+
+        if (calendarWin && !calendarWin.isDestroyed()) {
+            // Already open — just update the data
+            calendarWin.webContents.send('calendar-data', data);
+            return;
+        }
+
+        // Position: bottom-right area, to the LEFT of the Nova widget
+        const novaW  = 130;
+        const gap    = 12;
+        const panelX = sw - novaW - gap - CAL_W;
+        const panelY = sh - CAL_H - 8;
+
+        calendarWin = new BrowserWindow({
+            width: CAL_W,
+            height: CAL_H,
+            x: panelX,
+            y: panelY,
+            transparent: true,
+            frame: false,
+            hasShadow: false,
+            alwaysOnTop: true,
+            skipTaskbar: true,
+            resizable: false,
+            ...(process.platform === 'linux' ? { type: 'toolbar' } : {}),
+            webPreferences: {
+                nodeIntegration: true,
+                contextIsolation: false,
+            }
+        });
+        calendarWin.setAlwaysOnTop(true, 'screen-saver');
+        calendarWin.loadFile(path.join(__dirname, 'calendar_panel.html'));
+
+        calendarWin.once('ready-to-show', () => {
+            calendarWin.show();
+            // Send data once the window is ready
+            setTimeout(() => {
+                if (calendarWin && !calendarWin.isDestroyed()) {
+                    calendarWin.webContents.send('calendar-data', data);
+                }
+            }, 150);
+        });
+
+        calendarWin.on('closed', () => { calendarWin = null; });
+
+        // Auto-dismiss after 45 seconds
+        setTimeout(() => {
+            if (calendarWin && !calendarWin.isDestroyed()) calendarWin.close();
+        }, 45000);
+    },
+
+    // Called by calendar_panel.html when user clicks the close button
+    hideCalendarPanel: () => {
+        if (calendarWin && !calendarWin.isDestroyed()) calendarWin.close();
+    },
+
     // ── Code Agent tool handler ───────────────────────────────────────────
     codeAgentTool: async (args) => {
         const logFn = (msg) => {
@@ -828,6 +890,10 @@ function createBrowserWindow(incognito = false) {
         isBrowserReady = false;
         pendingBrowserUrl = null;
         setBrowserOpen(false);  // Sync live.js flag when window is closed by user
+        // Notify renderer to exit research paper mode
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('browser-window-closed');
+        }
     });
 }
 
@@ -863,10 +929,20 @@ ipcMain.handle('transcribe-audio', async (event, buffer) => {
 // Real-time IPC Hooks
 ipcMain.on('live-start', (event) => {
     startLiveSession(mainWindow, Automation);
+    // If a browser window is already open (e.g., research paper was open when
+    // the Live session timed out and restarted), restore the _browserIsOpen flag
+    // so Gemini can still close it via the control_browser tool.
+    if (browserWin && !browserWin.isDestroyed()) {
+        setBrowserOpen(true);
+    }
 });
 
 ipcMain.on('live-audio-chunk', (event, base64Data) => {
     sendAudioChunk(base64Data);
+});
+
+ipcMain.on('calendar-panel-hide', () => {
+    Automation.hideCalendarPanel();
 });
 
 ipcMain.on('live-text-chunk', (event, text) => {
@@ -2575,6 +2651,228 @@ ipcMain.handle('calendar-delete-event', async (event, { eventId }) => {
     }
 });
 
+// ── Project Type Auto-Detector ────────────────────────────────────────────
+// Inspects a project folder and returns the code_agent project_type string,
+// or null if detection fails. Used when the user opens an existing project.
+function detectProjectType(projectPath) {
+    const p = require('path');
+    const pkgFile    = p.join(projectPath, 'package.json');
+    const reqFile    = p.join(projectPath, 'requirements.txt');
+    const mainPy     = p.join(projectPath, 'main.py');
+    const manifestF  = p.join(projectPath, 'manifest.json');
+    const frontendD  = p.join(projectPath, 'frontend');
+    const backendD   = p.join(projectPath, 'backend');
+    const indexHtml  = p.join(projectPath, 'index.html');
+    const binDir     = p.join(projectPath, 'bin');
+
+    try {
+        // Fullstack: has both frontend/ and backend/ dirs
+        if (fs.existsSync(frontendD) && fs.existsSync(backendD)) return 'fullstack';
+
+        // Chrome extension: has manifest.json with manifest_version
+        if (fs.existsSync(manifestF)) {
+            try {
+                const m = JSON.parse(fs.readFileSync(manifestF, 'utf8'));
+                if (m.manifest_version) return 'extension';
+            } catch (_) {}
+        }
+
+        // Python: has requirements.txt or main.py
+        if (fs.existsSync(reqFile) || fs.existsSync(mainPy)) return 'python';
+
+        // Node-based: read package.json
+        if (fs.existsSync(pkgFile)) {
+            const pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));
+            const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+
+            // CLI: has bin/ directory or "bin" field in package.json
+            if (fs.existsSync(binDir) || pkg.bin) return 'cli';
+
+            // React: depends on react
+            if (deps['react'] || deps['@vitejs/plugin-react']) return 'react';
+
+            // Express API: depends on express but not react
+            if (deps['express']) return 'api_only';
+
+            // Fallback Node project: has dev/start script → treat as api_only
+            if (pkg.scripts && (pkg.scripts.dev || pkg.scripts.start)) return 'api_only';
+        }
+
+        // Static site: has index.html but no package.json
+        if (fs.existsSync(indexHtml)) return 'static_website';
+
+    } catch (_) {}
+
+    return null;
+}
+
+// ── Terminal / Project Info Demo Page ─────────────────────────────────────
+// Shown in Nova's internal browser for project types that have no web server
+// (CLI, Chrome extension, Python-without-port) and for existing projects
+// where no server could be started.
+function buildTerminalDemoHtml(projectName, projectType, projectPath) {
+    const path = require('path');
+
+    // Detect commands from project files
+    let installCmd = '', runCmd = '', extraLines = [];
+    const pkgPath = path.join(projectPath, 'package.json');
+    const reqPath = path.join(projectPath, 'requirements.txt');
+
+    if (fs.existsSync(pkgPath)) {
+        try {
+            const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+            installCmd = 'npm install';
+            if (pkg.scripts) {
+                runCmd = pkg.scripts.dev  ? 'npm run dev'
+                       : pkg.scripts.start ? 'npm start'
+                       : pkg.scripts.build ? 'npm run build'
+                       : 'npm start';
+            }
+            if (projectType === 'cli' && pkg.bin) {
+                const binName = Object.keys(pkg.bin)[0] || projectName.toLowerCase();
+                runCmd = `node bin/index.js --help`;
+                extraLines = [
+                    `$ node bin/index.js --help`,
+                    ``,
+                    `  ${projectName} CLI v1.0.0`,
+                    ``,
+                    `  Usage: ${binName} [command] [options]`,
+                    ``,
+                    `  Options:`,
+                    `    -h, --help     Show help`,
+                    `    -V, --version  Show version`,
+                    ``,
+                    `  Commands:`,
+                    `    run [options]  Run the main action`,
+                    `    list           List available items`,
+                    ``,
+                ];
+            }
+        } catch (_) {}
+    } else if (fs.existsSync(reqPath)) {
+        installCmd = 'pip install -r requirements.txt';
+        runCmd     = 'python main.py';
+        extraLines = [
+            `$ python main.py`,
+            ``,
+            `  ${projectName} — Python 3.11+`,
+            `  Running...`,
+            ``,
+            `  ✓ Initialized`,
+            `  ✓ Processing`,
+            `  Done.`,
+        ];
+    }
+
+    if (projectType === 'extension') {
+        installCmd = '— no install needed —';
+        runCmd     = '';
+        extraLines = [
+            `  How to load your extension in Chrome:`,
+            ``,
+            `  1. Open Chrome and go to:`,
+            `     chrome://extensions`,
+            ``,
+            `  2. Enable "Developer mode" (top-right toggle)`,
+            ``,
+            `  3. Click "Load unpacked"`,
+            ``,
+            `  4. Select the project folder:`,
+            `     ${projectPath}`,
+            ``,
+            `  ✓ Extension will appear in your toolbar`,
+        ];
+    }
+
+    const steps = [
+        installCmd ? { label: 'Install', cmd: installCmd } : null,
+        runCmd     ? { label: 'Run',     cmd: runCmd }     : null,
+    ].filter(Boolean);
+
+    const stepsHtml = steps.map(s => `
+        <div class="step">
+          <div class="step-label">${s.label}</div>
+          <div class="step-cmd">
+            <code>${s.cmd}</code>
+            <button class="copy-btn" onclick="copy(this,'${s.cmd.replace(/'/g,"\\'")}')">Copy</button>
+          </div>
+        </div>`).join('');
+
+    const termLines = extraLines.length ? extraLines : [
+        `$ ${runCmd || 'Run the project using the command above'}`,
+        ``,
+        `  ${projectName} — ready.`,
+    ];
+    const termHtml = termLines.map(l =>
+        `<div class="tl">${l.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`
+    ).join('');
+
+    const typeLabel = {
+        cli:'CLI Tool', extension:'Chrome Extension', python:'Python Project',
+        static_website:'Static Website', react:'React App',
+        api_only:'REST API', fullstack:'Full-Stack App',
+    }[projectType] || 'Project';
+
+    return `<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${projectName} — Nova Preview</title>
+<style>
+:root{--bg:#080810;--surface:#0e0e1c;--border:rgba(255,255,255,0.07);--accent:#6366f1;--cyan:#06b6d4;--green:#10b981;--text:#f1f5f9;--text-2:#94a3b8;--muted:#475569}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:14px/1.6 'Inter',system-ui,sans-serif;min-height:100vh;padding:32px 24px}
+.header{display:flex;align-items:center;gap:16px;margin-bottom:32px;padding-bottom:20px;border-bottom:1px solid var(--border)}
+.badge{background:rgba(99,102,241,0.12);border:1px solid rgba(99,102,241,0.3);color:var(--accent);font-size:11px;font-weight:700;padding:4px 12px;border-radius:20px;letter-spacing:0.5px;text-transform:uppercase}
+h1{font-size:1.5rem;font-weight:700;letter-spacing:-0.02em}
+.subtitle{color:var(--text-2);font-size:13px;margin-top:2px}
+.dot{width:10px;height:10px;background:var(--green);border-radius:50%;box-shadow:0 0 10px var(--green);flex-shrink:0}
+.steps{display:flex;flex-direction:column;gap:12px;margin-bottom:28px}
+.step{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 18px}
+.step-label{font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
+.step-cmd{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+code{font-family:'JetBrains Mono','Fira Code',monospace;font-size:13px;color:var(--cyan);flex:1;word-break:break-all}
+.copy-btn{background:rgba(6,182,212,0.08);border:1px solid rgba(6,182,212,0.25);color:var(--cyan);padding:4px 12px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;transition:all 0.15s;flex-shrink:0}
+.copy-btn:hover{background:rgba(6,182,212,0.18);border-color:rgba(6,182,212,0.5)}
+.term-label{font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+.terminal{background:#030308;border:1px solid rgba(255,255,255,0.06);border-radius:10px;padding:20px 22px;font-family:'JetBrains Mono','Fira Code','Courier New',monospace;font-size:12.5px;line-height:1.75;color:#a8d8b0;overflow-x:auto}
+.terminal .tl:first-child{color:#6ee7b7;font-weight:600}
+.term-bar{display:flex;gap:6px;margin-bottom:16px;padding-bottom:14px;border-bottom:1px solid rgba(255,255,255,0.05)}
+.tb{width:11px;height:11px;border-radius:50%}
+.tb.r{background:#ef4444}.tb.y{background:#f59e0b}.tb.g{background:#10b981}
+.footer{margin-top:28px;color:var(--muted);font-size:11px;letter-spacing:0.3px;text-align:center}
+</style></head><body>
+<div class="header">
+  <div class="dot"></div>
+  <div>
+    <h1>${projectName}</h1>
+    <div class="subtitle">Generated by Nova Code Engine</div>
+  </div>
+  <div class="badge">${typeLabel}</div>
+</div>
+
+${stepsHtml ? `<div class="steps">${stepsHtml}</div>` : ''}
+
+<div class="term-label">Terminal Preview</div>
+<div class="terminal">
+  <div class="term-bar"><div class="tb r"></div><div class="tb y"></div><div class="tb g"></div></div>
+  ${termHtml}
+</div>
+
+<div class="footer">Nova AI · Code Agent · ${new Date().toLocaleDateString()}</div>
+
+<script>
+function copy(btn, text) {
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '✓ Copied';
+    btn.style.color = '#10b981';
+    btn.style.borderColor = 'rgba(16,185,129,0.5)';
+    setTimeout(() => { btn.textContent = orig; btn.style.color = ''; btn.style.borderColor = ''; }, 1500);
+  });
+}
+</script>
+</body></html>`;
+}
+
 // ── Code Agent Tool Handler ────────────────────────────────────────────────
 // Orchestrates the full coding session: project creation, generation, preview,
 // modification, and teardown.  Called by Automation.codeAgentTool from live.js.
@@ -2666,11 +2964,15 @@ async function handleCodeAgentTool(args, logFn) {
                 }
 
                 const existingPath = require('path').join(codeAgent.getDesktopPath(), match.name);
-                codeAgent.setProject(match.name, null, existingPath);
+                const detectedType = detectProjectType(existingPath);
+                codeAgent.setProject(match.name, detectedType, existingPath);
                 await codeAgent.openInVSCode(existingPath, log);
+                const typeLabel = { static_website:'static website', react:'React app', api_only:'API',
+                    fullstack:'full-stack app', cli:'CLI tool', extension:'Chrome extension', python:'Python project' };
+                const typeHint = detectedType ? ` Detected type: ${typeLabel[detectedType] || detectedType}.` : '';
                 return {
                     status: 'opened',
-                    speak: `Opened "${match.name}" in VS Code. What would you like to do with this project?`,
+                    speak: `Opened "${match.name}" in VS Code.${typeHint} What would you like to do with this project?`,
                     projectPath: existingPath,
                 };
             }
@@ -2721,16 +3023,17 @@ async function handleCodeAgentTool(args, logFn) {
 
                 // Open browser preview
                 if (!noServer && serverResult.success) {
+                    // React/Vite: port opens before the first compile finishes — wait for bundle
+                    if (project_type === 'react' || project_type === 'fullstack') {
+                        await new Promise(r => setTimeout(r, 3500));
+                    }
                     if (project_type === 'api_only') {
                         const html     = codeAgent.buildApiPreviewHtml(generated.endpoints || [], serverResult.port || generated.port);
                         const prevPath = require('path').join(state.projectPath, '.nova_api_preview.html');
                         fs.writeFileSync(prevPath, html, 'utf8');
                         openCodePreview(`file://${prevPath}`);
                     } else {
-                        const previewUrl = project_type === 'fullstack'
-                            ? `http://localhost:${serverResult.port}`
-                            : `http://localhost:${serverResult.port}`;
-                        openCodePreview(previewUrl);
+                        openCodePreview(`http://localhost:${serverResult.port}`);
                     }
                 } else if (project_type === 'fullstack' && serverResult.apiPort) {
                     // Show API explorer for full-stack even if frontend not ready
@@ -2738,6 +3041,12 @@ async function handleCodeAgentTool(args, logFn) {
                     const prevPath = require('path').join(state.projectPath, '.nova_api_preview.html');
                     fs.writeFileSync(prevPath, html, 'utf8');
                     openCodePreview(`file://${prevPath}`);
+                } else if (noServer) {
+                    // CLI / extension / python-no-port: show a terminal demo page instead
+                    const demoHtml = buildTerminalDemoHtml(state.projectName, project_type, state.projectPath);
+                    const demoPath = require('path').join(state.projectPath, '.nova_demo.html');
+                    fs.writeFileSync(demoPath, demoHtml, 'utf8');
+                    openCodePreview(`file://${demoPath}`);
                 }
 
                 const typeLabel = { static_website:'website', react:'React app', api_only:'REST API',
@@ -2747,7 +3056,7 @@ async function handleCodeAgentTool(args, logFn) {
                 return {
                     status: 'success',
                     speak: noServer
-                        ? `Your ${typeLabel[project_type]} "${state.projectName}" is ready in VS Code — ${filesN} files generated. What would you like to add or change?`
+                        ? `Your ${typeLabel[project_type]} "${state.projectName}" is ready — ${filesN} files generated. I've opened the project info in my browser. What would you like to add or change?`
                         : project_type === 'api_only'
                         ? `Your REST API "${state.projectName}" is live! I've opened the API Explorer — ${(generated.endpoints||[]).length} endpoints ready to test. What would you like to add?`
                         : `Your ${typeLabel[project_type]} "${state.projectName}" is running! ${filesN} files generated. I've opened the preview in my browser. What should we change or add?`,
@@ -2763,25 +3072,96 @@ async function handleCodeAgentTool(args, logFn) {
                 if (!instruction)       return { status: 'needs_info', speak: 'What changes would you like me to make?' };
 
                 const result = await codeAgent.modifyCode(instruction, log);
+                const modifiedFiles = (result.changes || []).length;
 
-                // Reload browser preview after hot-reload settles
-                if (state.serverPort) {
+                // ── Always show a preview after modifications ──────────────
+                // If project type wasn't set (e.g. opened via open_project without detection),
+                // try to detect it from the filesystem now.
+                const effectiveType = state.projectType || detectProjectType(state.projectPath);
+                if (effectiveType && !state.projectType) {
+                    codeAgent.setProject(state.projectName, effectiveType, state.projectPath);
+                }
+
+                const isNoServerType = effectiveType === 'cli'
+                    || effectiveType === 'extension'
+                    || (effectiveType === 'python' && !state.serverPort);
+
+                if (isNoServerType) {
+                    // CLI / extension / Python: refresh (or open) the terminal demo page
+                    const demoHtml = buildTerminalDemoHtml(state.projectName, effectiveType, state.projectPath);
+                    const demoPath = require('path').join(state.projectPath, '.nova_demo.html');
+                    fs.writeFileSync(demoPath, demoHtml, 'utf8');
+                    openCodePreview(`file://${demoPath}`);
+
+                } else if (state.serverPort) {
+                    // Server is running — wait for hot-reload then refresh/open the browser
                     await new Promise(r => setTimeout(r, 2000));
-                    if (browserWin && isBrowserReady) {
-                        if (state.projectType === 'api_only') {
-                            const html     = codeAgent.buildApiPreviewHtml(codeAgent.getEndpoints(), state.apiPort || state.serverPort);
-                            const prevPath = require('path').join(state.projectPath, '.nova_api_preview.html');
-                            fs.writeFileSync(prevPath, html, 'utf8');
+                    if (effectiveType === 'api_only') {
+                        const html     = codeAgent.buildApiPreviewHtml(codeAgent.getEndpoints(), state.apiPort || state.serverPort);
+                        const prevPath = require('path').join(state.projectPath, '.nova_api_preview.html');
+                        fs.writeFileSync(prevPath, html, 'utf8');
+                        if (browserWin && isBrowserReady) {
                             browserWin.webContents.send('navigate', `file://${prevPath}`);
                         } else {
-                            browserWin.webContents.send('navigate', `http://localhost:${state.serverPort}`);
+                            openCodePreview(`file://${prevPath}`);
                         }
+                    } else {
+                        const url = `http://localhost:${state.serverPort}`;
+                        if (browserWin && isBrowserReady) {
+                            browserWin.webContents.send('navigate', url);
+                        } else {
+                            openCodePreview(url);
+                        }
+                    }
+
+                } else if (effectiveType) {
+                    // Known project type but no server yet (e.g. opened existing project).
+                    // Try to start the dev server, then open preview.
+                    log(`🚀 [modify_code] No server running — starting ${effectiveType} preview server...`);
+                    try {
+                        const portMap = { react:5173, api_only:3001, fullstack:5173, python:8000, static_website:8080 };
+                        const port    = portMap[effectiveType] || 8080;
+
+                        // Detect devCommand from package.json
+                        const pkgPath = require('path').join(state.projectPath, 'package.json');
+                        let devCmd = effectiveType === 'static_website' ? null : 'npm run dev';
+                        if (fs.existsSync(pkgPath)) {
+                            try {
+                                const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+                                devCmd = pkg.scripts && pkg.scripts.dev   ? 'npm run dev'
+                                       : pkg.scripts && pkg.scripts.start ? 'npm start'
+                                       : devCmd;
+                            } catch (_) {}
+                        }
+
+                        const serverResult = await codeAgent.startDevServer(effectiveType, devCmd, port, log);
+                        if (serverResult.success) {
+                            // Extra settle time: React/Vite needs time after port opens to finish first compile
+                            const compileWait = (effectiveType === 'react' || effectiveType === 'fullstack') ? 3000 : 800;
+                            await new Promise(r => setTimeout(r, compileWait));
+                            if (effectiveType === 'api_only') {
+                                const html = codeAgent.buildApiPreviewHtml(codeAgent.getEndpoints(), serverResult.port);
+                                const prevPath = require('path').join(state.projectPath, '.nova_api_preview.html');
+                                fs.writeFileSync(prevPath, html, 'utf8');
+                                openCodePreview(`file://${prevPath}`);
+                            } else {
+                                openCodePreview(`http://localhost:${serverResult.port}`);
+                            }
+                        } else {
+                            // Server failed to start — show terminal demo as fallback
+                            const demoHtml = buildTerminalDemoHtml(state.projectName, effectiveType, state.projectPath);
+                            const demoPath = require('path').join(state.projectPath, '.nova_demo.html');
+                            fs.writeFileSync(demoPath, demoHtml, 'utf8');
+                            openCodePreview(`file://${demoPath}`);
+                        }
+                    } catch (e) {
+                        log(`⚠️ [modify_code] Preview server failed: ${e.message}`);
                     }
                 }
 
                 return {
                     status: 'success',
-                    speak: `Done! ${result.summary || 'Changes applied'} — ${(result.changes || []).length} file${(result.changes||[]).length !== 1 ? 's' : ''} updated. How does it look? What else should we change?`,
+                    speak: `Done! ${result.summary || 'Changes applied'} — ${modifiedFiles} file${modifiedFiles !== 1 ? 's' : ''} updated. How does it look? What else should we change?`,
                 };
             }
 
@@ -2790,7 +3170,20 @@ async function handleCodeAgentTool(args, logFn) {
                 const state = codeAgent.getState();
                 if (!state.projectPath) return { status: 'needs_project', speak: 'No active project to preview.' };
 
-                if (state.projectType === 'api_only' || (state.projectType === 'fullstack' && state.apiPort)) {
+                const pvType = state.projectType || detectProjectType(state.projectPath);
+                if (pvType && !state.projectType) codeAgent.setProject(state.projectName, pvType, state.projectPath);
+
+                // CLI / extension / python: show terminal demo page
+                if (pvType === 'cli' || pvType === 'extension' || pvType === 'python') {
+                    const demoHtml = buildTerminalDemoHtml(state.projectName, pvType, state.projectPath);
+                    const demoPath = require('path').join(state.projectPath, '.nova_demo.html');
+                    fs.writeFileSync(demoPath, demoHtml, 'utf8');
+                    openCodePreview(`file://${demoPath}`);
+                    return { status: 'ok', speak: `Opening the project overview for "${state.projectName}".` };
+                }
+
+                // API: show API Explorer
+                if (pvType === 'api_only' || (pvType === 'fullstack' && state.apiPort)) {
                     const prevPath = require('path').join(state.projectPath, '.nova_api_preview.html');
                     if (fs.existsSync(prevPath)) {
                         openCodePreview(`file://${prevPath}`);
@@ -2798,9 +3191,32 @@ async function handleCodeAgentTool(args, logFn) {
                     }
                 }
 
+                // Web server: start if not running, then open browser
+                if (!state.serverPort && pvType) {
+                    log('🚀 [preview_project] Starting server for preview...');
+                    const portMap = { react:5173, api_only:3001, fullstack:5173, static_website:8080 };
+                    const port = portMap[pvType] || 8080;
+                    const pkgPath = require('path').join(state.projectPath, 'package.json');
+                    let devCmd = pvType === 'static_website' ? null : 'npm run dev';
+                    if (fs.existsSync(pkgPath)) {
+                        try {
+                            const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+                            devCmd = pkg.scripts && pkg.scripts.dev   ? 'npm run dev'
+                                   : pkg.scripts && pkg.scripts.start ? 'npm start'
+                                   : devCmd;
+                        } catch (_) {}
+                    }
+                    const sr = await codeAgent.startDevServer(pvType, devCmd, port, log);
+                    if (sr.success) {
+                        if (pvType === 'react' || pvType === 'fullstack') await new Promise(r => setTimeout(r, 3500));
+                        openCodePreview(`http://localhost:${sr.port}`);
+                        return { status: 'ok', speak: `Server started — opening preview at localhost:${sr.port}.` };
+                    }
+                }
+
                 const url = `http://localhost:${state.serverPort || 8080}`;
                 openCodePreview(url);
-                return { status: 'ok', speak: `Preview opened at localhost:${state.serverPort || 8080}.` };
+                return { status: 'ok', speak: `Opening preview at localhost:${state.serverPort || 8080}.` };
             }
 
             // ── end_session ────────────────────────────────────────────────

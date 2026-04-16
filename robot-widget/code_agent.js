@@ -266,7 +266,7 @@ installCommand: "pip install -r requirements.txt"
 port: ${description.toLowerCase().includes('web') || description.toLowerCase().includes('api') || description.toLowerCase().includes('flask') || description.toLowerCase().includes('fastapi') ? '8000' : 'null'}`,
     };
 
-    return `You are Nova Code Engine — an elite senior software engineer. Generate a complete, production-ready "${name}" project.
+    return `You are Nova Code Engine — a world-class senior software engineer and UI/UX designer. Generate a complete, production-ready "${name}" project that looks visually stunning and professional.
 
 USER DESCRIPTION: "${description}"
 PROJECT TYPE: ${type}
@@ -274,23 +274,108 @@ PROJECT TYPE: ${type}
 ${structs[type] || structs.static_website}
 
 ═══════════════════════ QUALITY CONTRACT ═══════════════════════
-CODE:
+CODE QUALITY:
 • TypeScript strict everywhere (JS projects)
 • ES2022+ async/await, no callbacks
 • Named constants for magic values
 • Descriptive verb-noun function names
 • Full error handling — never swallow errors silently
 
-FRONTEND VISUAL DESIGN (if applicable):
-• Dark theme: --bg:#09090f  --surface:#0f0f1c  --border:rgba(255,255,255,0.08)
-• Primary accent: #c9a227 (gold)   Secondary: #00c8c8 (cyan)
-• Text: --text:#e8e8f4  --muted:#6b7280
-• Glassmorphism cards: background:rgba(255,255,255,0.04); backdrop-filter:blur(12px); border:1px solid rgba(255,255,255,0.08); border-radius:12px
-• Micro-interactions: hover transforms, smooth transitions (0.18s ease)
-• Font: system-ui,-apple-system,"Inter",sans-serif
-• Spacing: 8px grid base — generous padding, clear visual hierarchy
-• Loading states, empty states, error states — all handled
-• Mobile-first responsive with CSS Grid / Flexbox
+════════════════════ DESIGN SYSTEM — MANDATORY ════════════════════
+You MUST produce a visually stunning, modern, professional UI. Think Vercel, Linear, Stripe, Apple.com quality.
+
+CSS VARIABLES (define in :root and use EVERYWHERE — never hard-code values):
+  --bg:           #080810    /* page background */
+  --surface:      #0f0f1c    /* card / panel background */
+  --surface-2:    #161625    /* elevated surface */
+  --border:       rgba(255,255,255,0.07)
+  --border-hover: rgba(255,255,255,0.14)
+  --accent:       #6366f1    /* indigo — primary interactive */
+  --accent-2:     #8b5cf6    /* violet — secondary / gradient end */
+  --gold:         #c9a227    /* warm highlight */
+  --cyan:         #06b6d4    /* info / links */
+  --green:        #10b981    /* success */
+  --red:          #ef4444    /* error */
+  --text:         #f1f5f9    /* primary text */
+  --text-2:       #94a3b8    /* secondary text */
+  --text-3:       #475569    /* muted / placeholder */
+  --radius:       12px
+  --radius-sm:    8px
+  --radius-lg:    20px
+  --shadow:       0 4px 24px rgba(0,0,0,0.5)
+  --shadow-lg:    0 8px 48px rgba(0,0,0,0.65)
+  --transition:   0.18s ease
+
+TYPOGRAPHY — use a proper scale, never flat same-size text:
+  h1: clamp(2.2rem,5vw,3.8rem), font-weight:800, letter-spacing:-0.03em, line-height:1.1
+  h2: clamp(1.6rem,3vw,2.6rem), font-weight:700, letter-spacing:-0.02em
+  h3: 1.25rem, font-weight:600
+  body: 1rem/1.7, font-weight:400
+  small/label: 0.8125rem, font-weight:500, letter-spacing:0.06em, text-transform:uppercase
+  Font stack: 'Inter',system-ui,-apple-system,sans-serif
+
+NAVIGATION (every multi-page site needs this):
+  • Sticky top bar: backdrop-filter:blur(20px), background:rgba(8,8,16,0.85), border-bottom:1px solid var(--border)
+  • Logo left, nav links center/right
+  • Nav links: color:var(--text-2), hover:color:var(--text), transition
+  • Active/current page link highlighted with accent color
+  • Mobile hamburger menu that actually works
+
+HERO SECTION (for landing/marketing pages):
+  • Full viewport height or min 80vh
+  • Gradient text headline: background:linear-gradient(135deg,var(--text) 0%,var(--accent) 60%,var(--accent-2) 100%); -webkit-background-clip:text; -webkit-text-fill-color:transparent
+  • Subtle radial glow behind: radial-gradient(ellipse 80% 50% at 50% -10%, rgba(99,102,241,0.25), transparent)
+  • Clear CTA button with hover glow
+  • Subheadline in var(--text-2) with generous line-height
+
+BUTTONS — always define all states:
+  Primary:   background:var(--accent); color:#fff; padding:12px 28px; border-radius:var(--radius-sm); font-weight:600; border:none; cursor:pointer; transition:all var(--transition)
+             hover: background:#4f52e0; transform:translateY(-1px); box-shadow:0 4px 20px rgba(99,102,241,0.45)
+             active: transform:translateY(0); box-shadow:none
+  Ghost:     background:transparent; border:1px solid var(--border-hover); color:var(--text-2); padding:11px 26px
+             hover: border-color:var(--accent); color:var(--text); background:rgba(99,102,241,0.08)
+  Danger:    background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.3); color:var(--red)
+
+CARDS — make them feel premium:
+  background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:24px;
+  transition:border-color var(--transition), transform var(--transition), box-shadow var(--transition)
+  hover: border-color:var(--border-hover); transform:translateY(-2px); box-shadow:var(--shadow-lg)
+  Optional glow: box-shadow: 0 0 0 1px rgba(99,102,241,0.1), 0 8px 40px rgba(0,0,0,0.4)
+
+FORMS & INPUTS:
+  input/textarea: background:var(--surface-2); border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px 16px; color:var(--text); font-size:0.9375rem; outline:none; width:100%
+  focus: border-color:var(--accent); box-shadow:0 0 0 3px rgba(99,102,241,0.18)
+  label: color:var(--text-2); font-size:0.875rem; font-weight:500; margin-bottom:6px; display:block
+
+LAYOUT GRID — use CSS Grid, not floats:
+  Sections: max-width:1200px; margin:0 auto; padding:0 24px
+  Feature grid: grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:24px
+  Two-col: grid-template-columns:1fr 1fr; gap:48px; align-items:center
+
+ANIMATIONS — every element should feel alive:
+  Page load: @keyframes fadeUp { from{opacity:0;transform:translateY(20px)} to{opacity:1;transform:translateY(0)} }
+             Apply with: animation:fadeUp 0.5s ease both; stagger with animation-delay:0.1s increments
+  Scroll reveal: Use Intersection Observer to add class 'visible' that triggers transition
+  Hover lifts: transition: transform 0.18s ease, box-shadow 0.18s ease  →  hover: translateY(-2px)
+  Gradient shimmer on loading skeletons if applicable
+
+SECTION PATTERNS (use varied sections — not just a dump of text):
+  • Stats/numbers row: large bold number + label, separated by subtle dividers
+  • Feature grid: icon + title + description cards in 3-col grid
+  • Testimonials/quotes: card with quote, avatar, name, title
+  • CTA band: full-width gradient strip with headline + button
+  • Footer: multi-column links, logo, copyright, social icons
+
+REQUIRED DETAILS:
+  • Every interactive element has :hover and :focus-visible states
+  • Scrollbar styling: ::-webkit-scrollbar{width:6px} thumb:var(--border-hover) rounded
+  • ::selection { background:rgba(99,102,241,0.35); color:var(--text) }
+  • Smooth scroll: html { scroll-behavior: smooth }
+  • No layout shift — reserve space for images with aspect-ratio or min-height
+  • Dark mode is the default — this IS the design, not an afterthought
+  • Mobile responsive: stack grids below 768px, font sizes clamp(), touch targets ≥44px
+  • Use rem/em units, never px for layout (px ok for borders, shadows, outlines)
+═══════════════════════════════════════════════════════════════
 
 BACKEND:
 • CORS configured for localhost dev
@@ -301,7 +386,7 @@ BACKEND:
 
 PROJECT MUST work immediately after running installCommand then devCommand.
 Every file must be complete — no "// TODO" or placeholder comments.
-Make the project impressive — something a senior engineer would be proud of.
+Generate a project so visually polished that a designer would be proud of it.
 ═══════════════════════════════════════════════════════════════
 
 Return ONLY a valid JSON object — no markdown, no extra text:
@@ -336,9 +421,11 @@ ${fileDump}
 Rules:
 1. Make exactly the change described — nothing more, nothing less.
 2. Maintain the same code style, design language, and architecture.
-3. Only include files that actually changed.
-4. Complete file content — never partial snippets.
-5. If instruction needs a new file, include it.
+3. If the existing CSS uses the design variables (--bg, --accent, --surface, etc.), preserve and extend them.
+4. Only include files that actually changed.
+5. Complete file content — never partial snippets.
+6. If instruction needs a new file, include it.
+7. If the existing design looks plain/generic, you may upgrade it to be more polished while implementing the change.
 
 Return ONLY valid JSON:
 {

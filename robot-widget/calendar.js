@@ -247,17 +247,36 @@ async function handleCalendarActionTool(args, logFn) {
 
             let startISO, endISO, label;
             try {
-                const range = await parseNaturalTime(time_expression || 'today');
+                const range = await parseNaturalTime(time_expression || 'this week');
                 startISO = range.start;
                 endISO   = range.end;
-                const diffDays = Math.round((new Date(startISO) - new Date()) / 86_400_000);
-                label = diffDays === 0 ? 'today' : diffDays === 1 ? 'tomorrow' : diffDays === -1 ? 'yesterday' : toLocalDate(startISO);
+
+                // For range expressions (week, month) use the expression itself as the label.
+                const expr = (time_expression || 'this week').toLowerCase();
+                if (expr.includes('week')) {
+                    label = expr.includes('next') ? 'next week' : expr.includes('last') ? 'last week' : 'this week';
+                } else if (expr.includes('month')) {
+                    label = expr.includes('next') ? 'next month' : expr.includes('last') ? 'last month' : 'this month';
+                } else {
+                    // For specific dates, compare date strings (not timestamps) to avoid
+                    // off-by-one errors when startISO is midnight and current time is later in the day.
+                    const startStr     = new Date(startISO).toDateString();
+                    const today        = new Date();
+                    const todayStr     = today.toDateString();
+                    const tomorrowStr  = new Date(today.getTime() + 86_400_000).toDateString();
+                    const yesterdayStr = new Date(today.getTime() - 86_400_000).toDateString();
+                    if (startStr === todayStr)     label = 'today';
+                    else if (startStr === tomorrowStr)  label = 'tomorrow';
+                    else if (startStr === yesterdayStr) label = 'yesterday';
+                    else label = toLocalDate(startISO);
+                }
             } catch (e) {
+                // Fallback: this week
                 const now = new Date();
-                startISO  = now.toISOString();
-                const end = new Date(now); end.setHours(23, 59, 59, 999);
+                startISO  = new Date(now.setHours(0, 0, 0, 0)).toISOString();
+                const end = new Date(); end.setDate(end.getDate() + (7 - end.getDay())); end.setHours(23, 59, 59, 999);
                 endISO    = end.toISOString();
-                label     = 'today';
+                label     = 'this week';
             }
 
             const events  = await getEventsInRange(startISO, endISO);
