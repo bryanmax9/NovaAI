@@ -10,10 +10,18 @@ const TOKEN_PATH    = path.join(__dirname, 'credentials', 'google_token.json');
 const REDIRECT_PORT = 3141;
 const REDIRECT_URI  = process.env.GOOGLE_REDIRECT_URI || `http://localhost:${REDIRECT_PORT}/oauth2callback`;
 
+// ⚠️  Scope change note: adding a new scope invalidates any existing saved token.
+// After modifying this array, the user must re-run `npm run setup-google` once
+// to re-authorize and get a new token that includes all scopes.
 const SCOPES = [
     'https://www.googleapis.com/auth/gmail.send',
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/calendar',
+    // Searches the manually-saved Contacts list (Google Contacts app).
+    'https://www.googleapis.com/auth/contacts.readonly',
+    // Searches "Other contacts" — auto-populated by Gmail when you exchange
+    // emails with someone (required for READ_SOURCE_TYPE_OTHER_CONTACT).
+    'https://www.googleapis.com/auth/contacts.other.readonly',
 ];
 
 // Set once by initialize() so all callers share the same browser-open function.

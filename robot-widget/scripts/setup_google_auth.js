@@ -16,7 +16,7 @@ const { exec } = require('child_process');
 
 console.log('');
 console.log('╔══════════════════════════════════════════════════════════════╗');
-console.log('║        Nova — Google Services Setup (Gmail + Calendar)       ║');
+console.log('║   Nova — Google Services Setup (Gmail + Calendar + Contacts) ║');
 console.log('╚══════════════════════════════════════════════════════════════╝');
 console.log('');
 
@@ -35,7 +35,10 @@ async function main() {
     console.log('');
     console.log('🔐  Starting OAuth2 authorization flow...');
     console.log('    Your browser will open for Google authorization.');
-    console.log('    Please sign in and grant access to Gmail and Calendar.');
+    console.log('    Please sign in and grant access to:');
+    console.log('      • Gmail (send mail + read sent history)');
+    console.log('      • Google Calendar (read and write events)');
+    console.log('      • Google Contacts (read-only, for voice contact resolution)');
     console.log('');
 
     try {
@@ -73,8 +76,10 @@ async function main() {
         console.log('╚══════════════════════════════════════════════════════════════╝');
         console.log('');
         console.log('Nova can now:');
-        console.log('  📧  Send Gmail  → "Hey Nova, send an email to Bryan..."');
-        console.log('  📅  Calendar    → "Hey Nova, what\'s on my calendar tomorrow?"');
+        console.log('  📧  Send Gmail      → "Hey Nova, send an email to Bryan..."');
+        console.log('  📅  Calendar        → "Hey Nova, what\'s on my calendar tomorrow?"');
+        console.log('  👤  Contacts lookup → Nova resolves names via Google Contacts first,');
+        console.log('                        then Gmail sent history, then asks word-by-word.');
         console.log('');
         console.log('  npm start   ← launch Nova');
         console.log('');

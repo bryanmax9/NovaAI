@@ -272,6 +272,16 @@
       box-shadow: 0 0 5px rgba(212,168,42,0.20);
     }
     #widget.thinking .ibar   { animation-duration: 1.2s; opacity: 0.40; }
+
+    /* -- RECORDING (macro capture active) -- */
+    #widget.recording {
+      box-shadow: 0 0 18px 4px rgba(255, 60, 60, 0.7);
+      animation: recording-pulse 1.2s ease-in-out infinite alternate;
+    }
+    @keyframes recording-pulse {
+      from { box-shadow: 0 0 12px 2px rgba(255,60,60,0.5); }
+      to   { box-shadow: 0 0 24px 8px rgba(255,60,60,0.9); }
+    }
   </style>
 </head>
 <body>

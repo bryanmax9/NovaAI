@@ -634,6 +634,16 @@ ipcRenderer.on('calendar-events', (event, { events, timeExpression }) => {
     uiLog(`📅 Calendar panel: ${(events || []).length} event(s) for "${timeExpression || 'today'}"`);
 });
 
+// Macro recording state — adds/removes red pulsing glow on the orb widget.
+ipcRenderer.on('macro-recording-started', () => {
+    document.getElementById('widget').classList.add('recording');
+    uiLog('🎙️ Macro recording started');
+});
+ipcRenderer.on('macro-recording-stopped', () => {
+    document.getElementById('widget').classList.remove('recording');
+    uiLog('🎙️ Macro recording stopped');
+});
+
 async function analyzeScreen(userText) {
     try {
         uiLog('📸 Capturing screen for vision analysis...');

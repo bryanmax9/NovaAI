@@ -14,7 +14,7 @@ const { askGemini } = require('./gemini.js');
 const { transcribeAudio } = require('./stt.js');
 const { startLiveSession, sendAudioChunk, sendTextChunk, endLiveSession, setBrowserOpen, setStoreAssistantActive } = require('./live.js');
 const googleAuth                 = require('./google_auth');
-const { handleSendEmailTool }    = require('./gmail');
+const { handleSendEmailTool, handleListContactsTool } = require('./gmail');
 const { handleCalendarActionTool } = require('./calendar');
 const codeAgent                  = require('./code_agent');
 
@@ -82,6 +82,11 @@ function createWindow() {
 }
 
 let dragOffset = null;
+
+// ── Macro Recording State ──────────────────────────────────────────────────
+let _macroRecording = false;
+let _macroSteps = [];
+let _macroAwaitingName = false;
 
 ipcMain.on('drag-start', (event, { x, y }) => {
     const win = BrowserWindow.fromWebContents(event.sender);
@@ -775,6 +780,14 @@ const Automation = {
         return await handleSendEmailTool(args, null, logFn);
     },
 
+    listContactsTool: async (args) => {
+        const limit = Math.min(Math.max(args?.limit || 10, 1), 30);
+        console.log(`[Contacts Tool] Listing up to ${limit} contacts...`);
+        const result = await handleListContactsTool({ limit });
+        if (mainWindow) mainWindow.webContents.send('automation-log', `📋 Listed ${result.contacts?.length || 0} contacts`);
+        return result;
+    },
+
     // ── Calendar tool handler ─────────────────────────────────────────────
     calendarActionTool: async (args) => {
         const logFn = (msg) => {
@@ -852,6 +865,105 @@ const Automation = {
             console.log('[Code Agent]', msg);
         };
         return await handleCodeAgentTool(args, logFn);
+    },
+
+    // ── Macro Recording State Accessors ───────────────────────────────────
+    isMacroRecording: () => _macroRecording,
+    isMacroAwaitingName: () => _macroAwaitingName,
+    getMacroSteps: () => _macroSteps,
+
+    recordMacroStep: (step) => {
+        _macroSteps.push(step);
+        console.log(`[Macro] Captured step ${_macroSteps.length}: ${step.intent}`);
+    },
+
+    // ── Macro Control Tool Handler ─────────────────────────────────────────
+    handleMacroControl: async (args) => {
+        const { action, macro_name } = args;
+
+        if (action === 'start_recording') {
+            if (_macroRecording) {
+                return { speak: 'Already recording.' };
+            }
+            _macroRecording = true;
+            _macroSteps = [];
+            _macroAwaitingName = false;
+            if (mainWindow) mainWindow.webContents.send('macro-recording-started');
+            console.log('[Macro] Recording started');
+            return {
+                speak: "Recording started. Do your thing — I'll remember every step. Say 'stop recording' when you're done.",
+            };
+        }
+
+        if (action === 'stop_recording') {
+            if (!_macroRecording) {
+                return { speak: "I wasn't recording." };
+            }
+            _macroRecording = false;
+            if (mainWindow) mainWindow.webContents.send('macro-recording-stopped');
+
+            if (_macroSteps.length === 0) {
+                return { speak: 'No steps were recorded.' };
+            }
+
+            if (macro_name) {
+                const stepCount = _macroSteps.length;
+                saveMacro(macro_name, _macroSteps);
+                _macroAwaitingName = false;
+                return { speak: `Got it. ${stepCount} step${stepCount !== 1 ? 's' : ''} saved as ${macro_name}. Say 'run ${macro_name}' anytime.` };
+            }
+
+            _macroAwaitingName = true;
+            return {
+                speak: `Got it, ${_macroSteps.length} step${_macroSteps.length !== 1 ? 's' : ''} recorded. What should I call this routine?`,
+            };
+        }
+
+        if (action === 'run_macro') {
+            if (_macroAwaitingName && macro_name) {
+                // User is answering "what do you want to call it?"
+                saveMacro(macro_name, _macroSteps);
+                _macroAwaitingName = false;
+                _macroSteps = [];
+                return { speak: `Saved as ${macro_name}. Say 'run ${macro_name}' anytime.` };
+            }
+            if (!macro_name) {
+                return { speak: 'Which routine should I run? Tell me the name.' };
+            }
+            return await replayMacro(macro_name);
+        }
+
+        if (action === 'list_macros') {
+            const macros = loadMacros();
+            const keys = Object.keys(macros);
+            if (keys.length === 0) {
+                return { speak: "No routines saved yet. Say 'remember this workflow' to start recording one." };
+            }
+            const list = keys.map(k => `${macros[k].name} (${(macros[k].steps || []).length} steps)`).join(', ');
+            return { speak: `You have ${keys.length} saved routine${keys.length !== 1 ? 's' : ''}: ${list}.` };
+        }
+
+        if (action === 'delete_macro') {
+            if (!macro_name) {
+                return { speak: 'Which routine should I delete?' };
+            }
+            const key = macro_name.toLowerCase().replace(/\s+/g, '_');
+            const macros = loadMacros();
+            if (!macros[key]) {
+                return { speak: `I don't have a routine called ${macro_name}.` };
+            }
+            delete macros[key];
+            fs.writeFileSync(MACROS_FILE, JSON.stringify(macros, null, 2), 'utf8');
+            return { speak: `${macro_name} routine deleted.` };
+        }
+
+        return { speak: `Unknown macro action: ${action}` };
+    },
+
+    // ── Screen Vision Tool Handler ─────────────────────────────────────────
+    analyzeScreenTool: async (question) => {
+        if (mainWindow) mainWindow.webContents.send('automation-log', '🖥️ Analyzing screen...');
+        return await analyzeScreen(question);
     },
 };
 
@@ -2651,6 +2763,10 @@ ipcMain.handle('calendar-delete-event', async (event, { eventId }) => {
     }
 });
 
+ipcMain.handle('analyze-screen', async (event, question) => {
+    return await analyzeScreen(question);
+});
+
 // ── Project Type Auto-Detector ────────────────────────────────────────────
 // Inspects a project folder and returns the code_agent project_type string,
 // or null if detection fails. Used when the user opens an existing project.
@@ -3239,10 +3355,175 @@ async function handleCodeAgentTool(args, logFn) {
     }
 }
 
+// ── Macro Storage Helpers ──────────────────────────────────────────────────
+
+const MACROS_FILE = path.join(__dirname, 'macros', 'macros.json');
+
+function loadMacros() {
+    try {
+        if (!fs.existsSync(MACROS_FILE)) return {};
+        return JSON.parse(fs.readFileSync(MACROS_FILE, 'utf8'));
+    } catch (e) {
+        console.error('[Macro] Failed to load macros.json:', e.message);
+        return {};
+    }
+}
+
+function saveMacro(name, steps) {
+    const key = name.toLowerCase().replace(/\s+/g, '_');
+    const macros = loadMacros();
+    macros[key] = {
+        name,
+        created: new Date().toISOString(),
+        steps: steps.map((s, i) => ({ ...s, id: i + 1 })),
+    };
+    fs.writeFileSync(MACROS_FILE, JSON.stringify(macros, null, 2), 'utf8');
+    if (mainWindow) {
+        mainWindow.webContents.send('automation-log', `💾 Macro saved: ${name} (${steps.length} steps)`);
+    }
+    console.log(`[Macro] Saved "${name}" (${steps.length} steps) → key: ${key}`);
+    return key;
+}
+
+// ── Macro Replay ───────────────────────────────────────────────────────────
+
+async function executeStep(step) {
+    if (step.tool === 'execute_system_command') {
+        await executeAutomationInternal(step.args.command);
+    } else if (step.tool === 'control_browser') {
+        const { action, query, direction, target_text, element_id } = step.args;
+        if (action === 'open' && query) {
+            Automation.openBrowser(query);
+        } else if (action === 'scroll' && direction) {
+            Automation.scrollBrowser(direction);
+        } else if (action === 'smart_click' && target_text) {
+            Automation.smartClickBrowser(target_text);
+        } else if (action === 'click_id' && element_id) {
+            Automation.clickBrowserId(element_id);
+        } else if (action === 'close') {
+            Automation.closeBrowser();
+        }
+    } else if (step.tool === 'show_stock_chart') {
+        await showStockChartInternal(step.args.company, step.args.symbol || '');
+    } else if (step.tool === 'calendar_action') {
+        const { handleCalendarActionTool: calTool } = require('./calendar');
+        const logFn = (msg) => {
+            if (mainWindow) mainWindow.webContents.send('automation-log', msg);
+        };
+        await calTool(step.args, logFn);
+    }
+}
+
+async function replayMacro(macroName) {
+    const key = macroName.toLowerCase().replace(/\s+/g, '_');
+    const macros = loadMacros();
+    const macro = macros[key];
+
+    if (!macro) {
+        return { success: false, speak: `I don't have a routine called ${macroName}.` };
+    }
+
+    const steps = macro.steps || [];
+    const log = (msg) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('automation-log', msg);
+        }
+        console.log('[Macro]', msg);
+    };
+
+    log(`▶️ Running "${macro.name}" (${steps.length} steps)`);
+
+    for (const step of steps) {
+        try {
+            // Pre-check: skip focus-app if already frontmost (macOS only)
+            if (
+                process.platform === 'darwin' &&
+                step.tool === 'execute_system_command' &&
+                step.args.command && step.args.command.startsWith('focus-app ')
+            ) {
+                const appArg = step.args.command.replace('focus-app ', '').trim();
+                try {
+                    const { execSync } = require('child_process');
+                    const front = execSync(
+                        `osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true'`,
+                        { timeout: 2000 }
+                    ).toString().trim().toLowerCase();
+                    if (front.includes(appArg.toLowerCase())) {
+                        log(`⏩ Already frontmost — skipping: ${step.intent}`);
+                        continue;
+                    }
+                } catch (_) { /* osascript unavailable — execute the step anyway */ }
+            }
+
+            log(`⚙️ Step: ${step.intent}`);
+            await executeStep(step);
+
+            // Give browser steps extra time to load
+            const pauseMs = step.tool === 'control_browser' ? 1400 : 900;
+            await new Promise(r => setTimeout(r, pauseMs));
+        } catch (err) {
+            log(`⚠️ Skipped: ${step.intent} — ${err.message}`);
+            console.warn(`[Macro] Step skipped: ${step.intent} —`, err.message);
+            // Never abort the whole macro on a single failure
+        }
+    }
+
+    const doneMsg = `Done. Your ${macro.name} routine is complete.`;
+    log(`✅ ${doneMsg}`);
+    return { success: true, speak: doneMsg };
+}
+
+// ── Screen Vision Analysis ─────────────────────────────────────────────────
+
+const { GoogleGenAI: _GenAI } = require('@google/genai');
+const _screenAI = new _GenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+async function analyzeScreen(question = 'What is currently on the screen?') {
+    try {
+        const { desktopCapturer } = require('electron');
+        const sources = await desktopCapturer.getSources({
+            types: ['screen'],
+            thumbnailSize: { width: 1920, height: 1080 },
+        });
+        if (!sources || sources.length === 0) {
+            return "I couldn't capture the screen right now.";
+        }
+        const png = sources[0].thumbnail.toPNG();
+        const base64Image = png.toString('base64');
+
+        const response = await _screenAI.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: [{
+                role: 'user',
+                parts: [
+                    { inlineData: { mimeType: 'image/png', data: base64Image } },
+                    {
+                        text: question +
+                            ' Be concise — 2 to 4 sentences max unless the user asked for something detailed.' +
+                            ' Speak naturally as if describing it to someone who cannot see the screen.'
+                    }
+                ]
+            }]
+        });
+
+        return response.text;
+    } catch (e) {
+        console.error('[analyzeScreen] Error:', e.message);
+        return "I had trouble analyzing the screen. Try again.";
+    }
+}
+
 app.whenReady().then(() => {
     // Wire shell.openExternal into Google OAuth so consent flows open in the default browser
     googleAuth.initialize((url) => shell.openExternal(url));
     console.log(`[Nova] Google Auth status: ${googleAuth.isAuthenticated() ? '✅ authenticated' : '⚠️  not authenticated (run npm run setup-google)'}`);
+
+    // Ensure macros/ directory exists
+    const macrosDir = path.join(__dirname, 'macros');
+    if (!fs.existsSync(macrosDir)) {
+        fs.mkdirSync(macrosDir, { recursive: true });
+        console.log('[Macro] Created macros/ directory');
+    }
 
     const { session } = require('electron');
     session.defaultSession.setPermissionCheckHandler(() => true);

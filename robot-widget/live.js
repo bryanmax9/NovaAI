@@ -25,6 +25,10 @@ let _lastSmartClickTarget = '';      // target_text of the most recent smart_cli
 const _calendarDebounce = new Map(); // calKey → last-call timestamp, prevents Gemini from looping tool calls
 const CALENDAR_DEBOUNCE_MS = 12000;  // Ignore duplicate calendar calls within 12s
 const _codeAgentDebounce = new Map(); // action → last-call timestamp
+const _macroDebounce = new Map();    // action → last-call timestamp, 8s cooldown per macro action
+const MACRO_DEBOUNCE_MS = 8000;
+const _screenDebounce = new Map();   // 'screen_analyze' → last-call timestamp, 5s cooldown
+const SCREEN_DEBOUNCE_MS = 5000;
 const CODE_AGENT_DEBOUNCE_MS = {
     generate_code:  120000,  // generation takes 30-60s — block for 2 minutes
     modify_code:     60000,  // modification takes ~20s — block for 1 minute
@@ -288,7 +292,11 @@ async function startLiveSession(mainWindow, automation) {
                     "6. send_email — ONLY when user explicitly says 'send an email', 'email [person]', 'write an email to', or 'draft an email'.\n" +
                     "   - Triggers: 'send Bryan an email saying the demo is ready', 'email jim@csulb.edu about the pitch'\n" +
                     "   - NEVER triggers for: questions, topics, or anything that doesn't involve actively sending a message\n" +
-                    "   - After the tool responds, speak the confirmation: 'Email sent to [name]' or ask for clarification if needed\n\n" +
+                    "   - CONFIRMATION FLOW: The tool will ask you to confirm before sending. When it returns a confirmation question, speak it out loud and wait for the user.\n" +
+                    "     If user says yes/send/confirm → re-call send_email with confirmed=true and recipient_email set to the resolved address.\n" +
+                    "     If user says no/cancel/stop → say 'Got it, email cancelled.' Do NOT re-call send_email.\n" +
+                    "   - DISAMBIGUATION: If the tool returns a numbered list of contacts, speak the list and wait. When user picks, re-call with selected_index set.\n" +
+                    "   - WORD-BY-WORD: If the tool asks for a username or domain, speak the question, listen, then re-call with recipient_email set to what they said.\n\n" +
 
                     "7. calendar_action — ONLY for explicit calendar operations: checking schedule, creating events, cancelling events, checking availability.\n" +
                     "   - get_events triggers: 'what's on my calendar', 'what do I have this week', 'what's my schedule', 'what's my next meeting'\n" +
@@ -412,13 +420,13 @@ async function startLiveSession(mainWindow, automation) {
                             },
                             {
                                 name: "send_email",
-                                description: "Compose and send an email via Gmail. Use ONLY when the user explicitly says 'send an email', 'email someone', 'write an email to', 'draft an email', or similar direct email-sending commands. Nova automatically resolves the recipient name to an email address from the user's Gmail history. NEVER call for questions or conversation.",
+                                description: "Compose and send an email via Gmail. Use ONLY when the user explicitly says 'send an email', 'email someone', 'write an email to', 'draft an email', or similar direct email-sending commands. This tool uses a multi-turn confirmation flow: first call resolves the contact and returns a confirmation question; re-call with confirmed=true after the user says yes. NEVER send without confirmed=true. NEVER call for questions or general conversation.",
                                 parameters: {
                                     type: "OBJECT",
                                     properties: {
                                         recipient_name: {
                                             type: "STRING",
-                                            description: "Name of the person to email. Nova will look up their address automatically. Can also be a full email address."
+                                            description: "Name of the person to email. Nova resolves this to an email address via Google Contacts and sent mail history."
                                         },
                                         subject: {
                                             type: "STRING",
@@ -431,9 +439,35 @@ async function startLiveSession(mainWindow, automation) {
                                         draft_only: {
                                             type: "BOOLEAN",
                                             description: "If true, save as Gmail draft instead of sending immediately. Default: false."
+                                        },
+                                        recipient_email: {
+                                            type: "STRING",
+                                            description: "The resolved email address. Only set this when Nova has already confirmed the address with the user, or when assembling an address word-by-word. Never guess or hallucinate an address — let the contact resolution system populate it."
+                                        },
+                                        confirmed: {
+                                            type: "BOOLEAN",
+                                            description: "Set to true ONLY after you have read back the recipient name, email address, and subject to the user and received verbal confirmation. Default false. ALWAYS confirm before sending — never skip this step."
+                                        },
+                                        selected_index: {
+                                            type: "NUMBER",
+                                            description: "When Nova presented a numbered list of matching contacts (1, 2, 3, or 4), set this to the number the user chose."
                                         }
                                     },
                                     required: ["recipient_name", "message_intent"]
+                                }
+                            },
+                            {
+                                name: "list_contacts",
+                                description: "List the user's Google Contacts so they can see who they can email. Call this when the user asks 'who can I email?', 'show me my contacts', 'list my contacts', 'who do I have saved?', or any similar request to browse their address book. Do NOT call send_email for this request.",
+                                parameters: {
+                                    type: "OBJECT",
+                                    properties: {
+                                        limit: {
+                                            type: "NUMBER",
+                                            description: "How many contacts to return. Default: 10. Max: 30."
+                                        }
+                                    },
+                                    required: []
                                 }
                             },
                             {
@@ -504,6 +538,39 @@ async function startLiveSession(mainWindow, automation) {
                                     },
                                     required: ["action"]
                                 }
+                            },
+                            {
+                                name: "macro_control",
+                                description: "Record and replay multi-step voice routines (macros). Use 'start_recording' when user says 'remember this', 'record this workflow', 'start recording'. Use 'stop_recording' when user says 'stop recording', 'done recording', 'save this routine'. Use 'run_macro' when user says 'run [name]', 'do my [name] routine', 'start [name] workflow'. Use 'list_macros' when user asks what routines are saved. Use 'delete_macro' when user says 'forget [name] routine'. Never trigger from ambient audio.",
+                                parameters: {
+                                    type: "OBJECT",
+                                    properties: {
+                                        action: {
+                                            type: "STRING",
+                                            enum: ["start_recording", "stop_recording", "run_macro", "list_macros", "delete_macro"],
+                                            description: "Which macro operation to perform."
+                                        },
+                                        macro_name: {
+                                            type: "STRING",
+                                            description: "Name of the routine. Required for run_macro and delete_macro. For stop_recording, this is the name the user wants to give the routine."
+                                        }
+                                    },
+                                    required: ["action"]
+                                }
+                            },
+                            {
+                                name: "analyze_screen",
+                                description: "Take a screenshot and use Gemini Vision to analyze what is currently on the user's screen. Use when user says 'summarize this', 'what\\'s on my screen', 'what am I looking at', 'read this', 'explain this', 'describe my screen', 'what does this say', 'tell me about this page'. Do NOT use for general questions that don't require seeing the screen.",
+                                parameters: {
+                                    type: "OBJECT",
+                                    properties: {
+                                        question: {
+                                            type: "STRING",
+                                            description: "The specific question to answer about the screen content. Examples: 'Summarize the main content', 'What application is open?', 'Read the text visible', 'Explain what this code does'."
+                                        }
+                                    },
+                                    required: ["question"]
+                                }
                             }
                         ]
                     }
@@ -532,6 +599,60 @@ async function startLiveSession(mainWindow, automation) {
                     // HANDLE TOOL CALLS
                     if (message.toolCall) {
                         for (const call of message.toolCall.functionCalls) {
+
+                            // ── Macro Step Capture ──────────────────────────────────────────────
+                            // When recording is active, intercept certain tool calls and store them
+                            // as macro steps. The tool still EXECUTES normally (record while doing).
+                            if (automationRef && automationRef.isMacroRecording()) {
+                                const captureTools = new Set(['execute_system_command', 'control_browser', 'show_stock_chart']);
+                                const isCalendarRead = call.name === 'calendar_action' && call.args.action === 'get_events';
+                                // Only send_email and calendar mutations get a spoken warning.
+                                // code_agent and create_research_paper are silently skipped (no warning).
+                                const isDestructiveWithWarning = call.name === 'send_email' ||
+                                    (call.name === 'calendar_action' && call.args.action !== 'get_events');
+
+                                if (isDestructiveWithWarning) {
+                                    // Warn the user but don't block the tool from executing
+                                    const warnMsg = call.name === 'send_email'
+                                        ? "[MACRO WARNING] I won't record email sending in the routine — that would send it every time you run it. Speak this warning to the user."
+                                        : "[MACRO WARNING] I won't record calendar changes in the routine. Speak this warning to the user.";
+                                    try {
+                                        activeSession.sendRealtimeInput({ text: warnMsg });
+                                    } catch (_) {}
+                                } else if (captureTools.has(call.name) || isCalendarRead) {
+                                    // Tools not in captureTools and not isDestructiveWithWarning
+                                    // (get_browser_state, create_research_paper, code_agent, macro_control,
+                                    //  analyze_screen) fall through the entire if/else silently.
+                                    // Build a human-readable intent string
+                                    let intent = call.name;
+                                    if (call.name === 'execute_system_command') {
+                                        const cmd = (call.args.command || '').trim();
+                                        if (cmd.startsWith('focus-app ')) intent = `focus ${cmd.replace('focus-app ', '')}`;
+                                        else if (cmd.startsWith('increase-volume')) intent = 'increase volume';
+                                        else if (cmd.startsWith('decrease-volume')) intent = 'decrease volume';
+                                        else intent = cmd;
+                                    } else if (call.name === 'control_browser') {
+                                        const a = call.args.action || '';
+                                        if (a === 'open') intent = `open ${call.args.query || ''} in browser`;
+                                        else if (a === 'scroll') intent = `scroll browser ${call.args.direction || ''}`;
+                                        else if (a === 'smart_click') intent = `click "${call.args.target_text || ''}" in browser`;
+                                        else intent = `browser ${a}`;
+                                    } else if (call.name === 'show_stock_chart') {
+                                        intent = `show stock chart for ${call.args.company || ''}`;
+                                    } else if (call.name === 'calendar_action') {
+                                        intent = `get calendar events for ${call.args.time_expression || 'upcoming'}`;
+                                    }
+
+                                    automationRef.recordMacroStep({
+                                        intent,
+                                        tool: call.name,
+                                        args: call.args,
+                                        safe_to_repeat: true,
+                                        destructive: false,
+                                    });
+                                }
+                            }
+                            // ── End Macro Step Capture ──────────────────────────────────────────
 
                             if (call.name === 'get_browser_state') {
                                 const nowGbs = Date.now();
@@ -967,32 +1088,95 @@ async function startLiveSession(mainWindow, automation) {
                                     });
                                 }
 
-                            } else if (call.name === 'send_email') {
-                                console.log(`📧 [Email Tool] recipient="${call.args.recipient_name}" intent="${call.args.message_intent}"`);
+                            } else if (call.name === 'list_contacts') {
+                                activeSession.sendRealtimeInput({
+                                    functionResponses: [{
+                                        id: call.id,
+                                        response: { status: 'Processing', message: 'Fetching your contacts...' }
+                                    }]
+                                });
 
-                                // Acknowledge immediately so Nova can say "On it..." while processing
+                                if (automationRef && automationRef.listContactsTool) {
+                                    automationRef.listContactsTool(call.args || {}).then((result) => {
+                                        if (!activeSession) return;
+                                        const instr = result.status === 'success'
+                                            ? `[CONTACTS LIST] Read out these contacts to the user naturally: ${result.speak}. ` +
+                                              `Also mention they can say "send an email to [name]" to email any of them. Do NOT call any tool.`
+                                            : `[CONTACTS EMPTY] ${result.speak} Speak this out loud. Do NOT call any tool.`;
+                                        try { activeSession.sendRealtimeInput({ text: instr }); } catch (e) { /* ignore */ }
+                                    }).catch(() => {});
+                                }
+
+                            } else if (call.name === 'send_email') {
+                                const _emailArgs = call.args;
+                                console.log(`📧 [Email Tool] recipient="${_emailArgs.recipient_name}" confirmed=${!!_emailArgs.confirmed} intent="${_emailArgs.message_intent}"`);
+
+                                // Acknowledge immediately so Nova says something while the async
+                                // contact lookup runs. The real instruction (confirm / send / ask)
+                                // arrives via a text injection after the lookup completes.
                                 activeSession.sendRealtimeInput({
                                     functionResponses: [{
                                         id: call.id,
                                         response: {
                                             status: "Processing",
-                                            message: `Looking up the email address and composing the message. Tell the user you are sending the email now, then wait quietly.`
+                                            message: `Looking up the contact for this email request. Say out loud: "Let me look that up." Then stay quiet while processing.`
                                         }
                                     }]
                                 });
 
-                                // Run async: resolve contact + generate body + send
+                                // Run async: resolve contact → confirm → generate body → send
                                 if (automationRef && automationRef.sendEmailTool) {
-                                    automationRef.sendEmailTool(call.args).then((result) => {
+                                    automationRef.sendEmailTool(_emailArgs).then((result) => {
                                         if (!activeSession) return;
                                         const speakText = result.speak || result.message || 'Email processed.';
-                                        const instr = result.status === 'success'
-                                            ? `[EMAIL RESULT] ${speakText} Speak this confirmation out loud to the user now. Do NOT call any tool.`
-                                            : result.status === 'needs_clarification'
-                                            ? `[EMAIL NEEDS INPUT] ${speakText} Ask the user for the missing information.`
-                                            : result.status === 'auth_required'
-                                            ? `[EMAIL AUTH REQUIRED] ${speakText} Tell the user they need to authorize Gmail access by running npm run setup-google.`
-                                            : `[EMAIL ERROR] ${speakText} Tell the user what went wrong.`;
+                                        let instr;
+
+                                        switch (result.status) {
+                                            case 'success':
+                                                instr = `[EMAIL SENT] ${speakText} Speak this confirmation out loud now. Do NOT call any tool.`;
+                                                break;
+                                            case 'draft_saved':
+                                                instr = `[EMAIL DRAFT SAVED] ${speakText} Speak this out loud now. Do NOT call any tool.`;
+                                                break;
+                                            case 'needs_confirmation':
+                                                instr =
+                                                    `[EMAIL CONFIRM NEEDED] Speak this out loud to the user: "${speakText}" — then listen for their response. ` +
+                                                    `If they say yes, confirm, or send it: call send_email again with confirmed=true, ` +
+                                                    `recipient_email="${result.recipient_email || ''}", ` +
+                                                    `and all other original args (recipient_name, subject, message_intent, draft_only) exactly the same. ` +
+                                                    `If they say no, cancel, or stop: say "Got it, email cancelled." and do NOT call send_email again.`;
+                                                break;
+                                            case 'needs_disambiguation':
+                                                instr =
+                                                    `[EMAIL MULTIPLE CONTACTS] Speak this out loud: "${speakText}" — then wait for the user's choice. ` +
+                                                    `When they say a number (1, 2, 3, or 4) or pick by name, call send_email again with the same ` +
+                                                    `recipient_name, subject, message_intent, and draft_only, plus selected_index set to the number they chose.`;
+                                                break;
+                                            case 'needs_username':
+                                                instr =
+                                                    `[EMAIL NO CONTACT FOUND] Speak this out loud: "${speakText}" — then wait for their answer. ` +
+                                                    `When they say the username, call send_email again with the same args plus ` +
+                                                    `recipient_email set to exactly what they said (the username only — no @ symbol, no domain yet).`;
+                                                break;
+                                            case 'needs_domain':
+                                                instr =
+                                                    `[EMAIL NEEDS DOMAIN] Speak this out loud: "${speakText}" — then wait for their answer. ` +
+                                                    `When they say the domain, call send_email again with the same args plus ` +
+                                                    `recipient_email set to "${result.partial_username || ''}@[domain they said]". ` +
+                                                    `Assemble the full address as: ${result.partial_username || '[username]'}@[domain they say].`;
+                                                break;
+                                            case 'auth_required':
+                                                instr =
+                                                    `[EMAIL AUTH REQUIRED] ${speakText} ` +
+                                                    `Tell the user they need to authorize Gmail access by running npm run setup-google in a terminal, then restarting Nova.`;
+                                                break;
+                                            default:
+                                                // 'error', legacy 'needs_clarification', or any unknown status
+                                                instr = result.status === 'needs_clarification'
+                                                    ? `[EMAIL NEEDS INPUT] ${speakText} Ask the user for the missing information.`
+                                                    : `[EMAIL ERROR] ${speakText} Tell the user what went wrong.`;
+                                        }
+
                                         try {
                                             activeSession.sendRealtimeInput({ text: instr });
                                         } catch (e) {
@@ -1001,7 +1185,9 @@ async function startLiveSession(mainWindow, automation) {
                                     }).catch((e) => {
                                         console.error('📧 [Email] Unexpected error:', e.message);
                                         if (activeSession) {
-                                            activeSession.sendRealtimeInput({ text: `[EMAIL ERROR] The email could not be sent: ${e.message}. Tell the user there was a problem.` });
+                                            activeSession.sendRealtimeInput({
+                                                text: `[EMAIL ERROR] The email could not be processed: ${e.message}. Tell the user there was a problem.`
+                                            });
                                         }
                                     });
                                 }
@@ -1226,6 +1412,113 @@ async function startLiveSession(mainWindow, automation) {
                                         if (activeSession) {
                                             try {
                                                 activeSession.sendRealtimeInput({ text: `[CODE AGENT ERROR] ${e.message}. Tell the user there was a problem with the code agent. Do NOT call any tool.` });
+                                            } catch (_) {}
+                                        }
+                                    });
+                                }
+                            } else if (call.name === 'macro_control') {
+                                const { action } = call.args;
+                                const nowMacro = Date.now();
+
+                                // Debounce: 8s cooldown per action key
+                                if (nowMacro - (_macroDebounce.get(action) || 0) < MACRO_DEBOUNCE_MS) {
+                                    console.log(`🎙️ [Macro] Debounced duplicate: ${action}`);
+                                    try {
+                                        activeSession.sendRealtimeInput({
+                                            functionResponses: [{ id: call.id, response: {
+                                                status: 'already_done',
+                                                message: 'This macro action was just handled. Tell the user what happened. Do NOT call macro_control again.'
+                                            }}]
+                                        });
+                                    } catch (_) {}
+                                    return;
+                                }
+                                _macroDebounce.set(action, nowMacro);
+
+                                console.log(`🎙️ [Macro Tool] action="${action}" name="${call.args.macro_name || ''}"`);
+
+                                // Acknowledge immediately
+                                try {
+                                    activeSession.sendRealtimeInput({
+                                        functionResponses: [{
+                                            id: call.id,
+                                            response: { status: 'ok', message: `Processing macro ${action}. Say out loud what you are doing for the user, then wait for the result.` }
+                                        }]
+                                    });
+                                } catch (_) {}
+
+                                if (automationRef && automationRef.handleMacroControl) {
+                                    automationRef.handleMacroControl(call.args).then((result) => {
+                                        if (!activeSession) return;
+                                        const speakText = result.speak || 'Done.';
+                                        try {
+                                            activeSession.sendRealtimeInput({
+                                                text: `[MACRO RESULT] ${speakText} Speak this to the user naturally. Do NOT call any tool.`
+                                            });
+                                        } catch (e) {
+                                            console.error('🎙️ [Macro] Failed to inject result:', e.message);
+                                        }
+                                    }).catch((e) => {
+                                        console.error('🎙️ [Macro] Unexpected error:', e.message);
+                                        if (activeSession) {
+                                            try {
+                                                activeSession.sendRealtimeInput({ text: `[MACRO ERROR] ${e.message}. Tell the user something went wrong. Do NOT call any tool.` });
+                                            } catch (_) {}
+                                        }
+                                    });
+                                }
+
+                            } else if (call.name === 'analyze_screen') {
+                                const { question } = call.args;
+                                const nowScreen = Date.now();
+                                const screenKey = 'screen_analyze';
+
+                                // Debounce: 5s cooldown
+                                if (nowScreen - (_screenDebounce.get(screenKey) || 0) < SCREEN_DEBOUNCE_MS) {
+                                    console.log('🖥️ [Screen] Debounced — too soon after last capture.');
+                                    try {
+                                        activeSession.sendRealtimeInput({
+                                            functionResponses: [{ id: call.id, response: {
+                                                status: 'cooldown',
+                                                message: 'I just analyzed the screen. Tell the user to ask again in a moment if they need a fresh look. Do NOT call analyze_screen again.'
+                                            }}]
+                                        });
+                                    } catch (_) {}
+                                    return;
+                                }
+                                _screenDebounce.set(screenKey, nowScreen);
+
+                                console.log(`🖥️ [Screen Tool] question="${question}"`);
+
+                                if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+                                    mainWindowRef.webContents.send('automation-log', '🖥️ Analyzing screen...');
+                                }
+
+                                // Acknowledge immediately
+                                try {
+                                    activeSession.sendRealtimeInput({
+                                        functionResponses: [{
+                                            id: call.id,
+                                            response: { status: 'ok', message: `Capturing and analyzing the screen right now. Say out loud: "Let me take a look at your screen." Then wait quietly for the result.` }
+                                        }]
+                                    });
+                                } catch (_) {}
+
+                                if (automationRef && automationRef.analyzeScreenTool) {
+                                    automationRef.analyzeScreenTool(question).then((description) => {
+                                        if (!activeSession) return;
+                                        try {
+                                            activeSession.sendRealtimeInput({
+                                                text: `[SCREEN ANALYSIS] ${description} Speak this description naturally to the user right now. Do NOT call any tool.`
+                                            });
+                                        } catch (e) {
+                                            console.error('🖥️ [Screen] Failed to inject result:', e.message);
+                                        }
+                                    }).catch((e) => {
+                                        console.error('🖥️ [Screen] Unexpected error:', e.message);
+                                        if (activeSession) {
+                                            try {
+                                                activeSession.sendRealtimeInput({ text: `[SCREEN ERROR] I had trouble analyzing the screen: ${e.message}. Apologize to the user briefly. Do NOT call any tool.` });
                                             } catch (_) {}
                                         }
                                     });
