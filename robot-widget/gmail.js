@@ -293,17 +293,26 @@ function parseAddressHeader(headerValue) {
  * Returns { subject, body }.
  */
 async function generateEmailContent(recipientName, subjectHint, messageIntent) {
+    const hour = new Date().getHours();
+    const timeOfDay = hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening';
+    const greeting = `Good ${timeOfDay}`;
+    const senderName = 'Bryan';
+
     const prompt =
-        `Write a short, professional email body (2–4 sentences unless more detail was requested).\n` +
+        `Write a complete, professional email. Follow this EXACT structure:\n\n` +
+        `1. Opening line: "${greeting}, ${recipientName}," (on its own line)\n` +
+        `2. Body: 2–4 sentences expanding on the intent below, professional but warm. Match the tone to the context.\n` +
+        `3. Closing sentence: one line fitting the context (e.g. "Thank you for your time.", "Looking forward to hearing from you.", "I hope you have a wonderful ${timeOfDay}.", etc.)\n` +
+        `4. Sign-off: "Best regards," or context-appropriate alternative ("Kind regards,", "Sincerely,", "Warm regards,")\n` +
+        `5. Sender name: "${senderName}"\n\n` +
         `Recipient: ${recipientName}\n` +
-        `Subject hint: ${subjectHint || '(none)'}\n` +
-        `What the email should say: "${messageIntent}"\n\n` +
+        `Subject hint: ${subjectHint || '(derive from intent)'}\n` +
+        `Email intent: "${messageIntent}"\n\n` +
         `Rules:\n` +
-        `- Do NOT include a subject line, salutation, or sign-off in the body\n` +
-        `- Just write the body paragraphs\n` +
-        `- Be professional but warm\n` +
-        `- Keep it concise unless the user asked for detail\n` +
-        `Also suggest a concise subject line (max 8 words).\n\n` +
+        `- Do NOT add a subject line inside the body text\n` +
+        `- Keep it concise unless the intent requires detail\n` +
+        `- The "body" field must contain the FULL email: opening, paragraphs, closing sentence, sign-off, and sender name\n\n` +
+        `Also provide a concise subject line (max 8 words) based on the intent.\n\n` +
         `Respond as JSON only: { "subject": "...", "body": "..." }`;
 
     try {
@@ -499,28 +508,77 @@ async function handleSendEmailTool(
                 return { status: 'needs_disambiguation', speak: msg, message: msg };
 
             } else {
-                // LAYER 4: no match anywhere — start word-by-word fallback
-                const msg =
-                    `I don't have a contact for ${recipient_name}. ` +
-                    `What's the username — the part before the @ symbol?`;
-                return { status: 'needs_username', speak: msg, message: msg };
+                // LAYER 3: fuzzy match against full contacts list (catches Vosk mangling)
+                const allContacts = await listContacts(50);
+                if (allContacts.length > 0) {
+                    const query = recipient_name.toLowerCase().replace(/[\s.]+/g, '');
+                    const fuzzyMatches = allContacts.filter(c => {
+                        const nameParts  = c.displayName.toLowerCase().split(/\s+/);
+                        const nameNorm   = c.displayName.toLowerCase().replace(/[\s.]+/g, '');
+                        const emailUser  = c.email.toLowerCase().split('@')[0].replace(/[\s.]+/g, '');
+                        return (
+                            nameParts.some(p => p.length > 2 && (query.includes(p) || p.includes(query))) ||
+                            nameNorm.includes(query) || query.includes(nameNorm) ||
+                            emailUser.includes(query) || query.includes(emailUser)
+                        );
+                    });
+                    if (fuzzyMatches.length === 1) {
+                        resolvedEmail = fuzzyMatches[0].email;
+                        resolvedName  = fuzzyMatches[0].displayName;
+                        log(`📧 Fuzzy match: "${recipient_name}" → ${resolvedEmail}`);
+                    } else if (fuzzyMatches.length > 1) {
+                        const options = fuzzyMatches.slice(0, 4)
+                            .map((m, i) => `${i + 1}: ${m.displayName} at ${m.email}`)
+                            .join(', ');
+                        const msg =
+                            `I found ${fuzzyMatches.length} contacts that might match. ` +
+                            `${options}. Which one did you mean?`;
+                        return { status: 'needs_disambiguation', speak: msg, message: msg };
+                    }
+                }
+
+                if (!resolvedEmail) {
+                    // LAYER 4: no match anywhere — start word-by-word fallback
+                    const msg =
+                        `I don't have a contact for ${recipient_name}. ` +
+                        `What's the username — the part before the @ symbol?`;
+                    return { status: 'needs_username', speak: msg, message: msg };
+                }
             }
         }
 
         // ── LAYER 2: confirmation (mandatory before every send) ───────────────
         if (!confirmed) {
+            // Generate the subject line NOW so the user knows exactly what they're confirming.
+            // The full body is generated after the user says yes.
+            let confirmSubject = subject;
+            if (!confirmSubject && message_intent) {
+                try {
+                    const subjectPrompt =
+                        `Generate only a concise email subject line (max 8 words) for this intent:\n"${message_intent}"\nRespond with just the subject line, nothing else.`;
+                    const subResp = await ai.models.generateContent({
+                        model: 'gemini-2.5-flash',
+                        contents: [{ parts: [{ text: subjectPrompt }] }],
+                        config: { temperature: 0.3 },
+                    });
+                    const raw = subResp.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+                    if (raw) confirmSubject = raw.replace(/^["']|["']$/g, '').trim();
+                } catch (_) {}
+            }
+            confirmSubject = confirmSubject || 'Nova Update';
+
             const verb    = draft_only ? 'save a draft' : 'send an email';
             const confirm = draft_only ? 'save the draft' : 'send it';
-            const sub     = subject || 'your message';
             const msg =
                 `I'll ${verb} to ${resolvedName} at ${resolvedEmail}, ` +
-                `subject: "${sub}". Should I ${confirm}?`;
+                `subject: "${confirmSubject}". Should I ${confirm}?`;
             return {
                 status:            'needs_confirmation',
                 speak:             msg,
                 message:           msg,
                 recipient_email:   resolvedEmail,
                 recipient_display: resolvedName,
+                confirmed_subject: confirmSubject,
             };
         }
 

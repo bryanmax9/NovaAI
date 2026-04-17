@@ -619,6 +619,19 @@ ipcRenderer.on('show-status-message', (_e, msg) => {
     }
 });
 
+// Image generation visual state — purple creative pulse on the robot + tinted badge
+const _widget = document.getElementById('widget');
+ipcRenderer.on('image-generating-state', (_e, active) => {
+    if (!_widget || !_statusBadge) return;
+    if (active) {
+        _widget.classList.add('generating');
+        _statusBadge.classList.add('image-gen');
+    } else {
+        _widget.classList.remove('generating');
+        _statusBadge.classList.remove('image-gen');
+    }
+});
+
 // When the browser window is closed (by user clicking X or via voice command),
 // exit research paper mode so context is no longer injected on reconnect.
 ipcRenderer.on('browser-window-closed', () => {

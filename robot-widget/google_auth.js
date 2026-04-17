@@ -166,6 +166,16 @@ async function getAuthClient() {
     const token  = loadToken();
 
     if (token) {
+        // Check that the saved token covers all required scopes.
+        // A token from before a scope was added will silently fail API calls.
+        const savedScopes = (token.scope || '').split(' ').filter(Boolean);
+        const missingScopes = SCOPES.filter(s => !savedScopes.includes(s));
+        if (missingScopes.length > 0) {
+            console.warn('[GoogleAuth] Token is missing scopes, re-authenticating:', missingScopes);
+            try { fs.unlinkSync(TOKEN_PATH); } catch (_) {}
+            return await runOAuthFlow(client);
+        }
+
         client.setCredentials(token);
 
         if (token.expiry_date && Date.now() > token.expiry_date - 120_000) {

@@ -282,6 +282,41 @@
       from { box-shadow: 0 0 12px 2px rgba(255,60,60,0.5); }
       to   { box-shadow: 0 0 24px 8px rgba(255,60,60,0.9); }
     }
+
+    /* -- GENERATING IMAGE -- purple/magenta creative pulse */
+    #widget.generating #arc  {
+      background: conic-gradient(
+        from 0deg,
+        transparent 0deg, transparent 40deg,
+        rgba(200,100,255,0.45) 70deg, rgba(230,80,255,1) 108deg,
+        rgba(200,100,255,0.45) 140deg, transparent 170deg, transparent 360deg
+      );
+      animation-duration: 2.2s;
+      filter: drop-shadow(0 0 5px rgba(200,80,255,0.90));
+    }
+    #widget.generating #arc2 { animation-duration: 1.4s; opacity: 0.60; }
+    #widget.generating #ring {
+      border-color: rgba(190,80,255,0.55);
+      box-shadow: 0 0 10px rgba(190,80,255,0.40), 0 0 22px rgba(190,80,255,0.18);
+      animation: ring-pulse-gen 1.2s ease-in-out infinite;
+    }
+    #widget.generating .ibar {
+      background: rgba(210,90,255,0.90);
+      animation-duration: 0.9s;
+    }
+    @keyframes ring-pulse-gen {
+      0%,100% { box-shadow: 0 0 8px rgba(190,80,255,0.40), 0 0 20px rgba(190,80,255,0.18); }
+      50%      { box-shadow: 0 0 16px rgba(210,80,255,0.70), 0 0 36px rgba(210,80,255,0.30); }
+    }
+    /* dot in badge turns magenta during image gen */
+    #nova-status-badge.image-gen::before {
+      background: rgba(210,90,255,0.95);
+      box-shadow: 0 0 6px rgba(210,90,255,0.8);
+    }
+    #nova-status-badge.image-gen {
+      color: rgba(220,120,255,1.0);
+      border-color: rgba(190,80,255,0.50);
+    }
   </style>
 </head>
 <body>

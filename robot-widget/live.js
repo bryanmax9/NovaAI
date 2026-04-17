@@ -24,6 +24,11 @@ let _stuckClickCount = 0;            // How many consecutive auto-scans landed o
 let _lastSmartClickTarget = '';      // target_text of the most recent smart_click — used in fallback message
 const _calendarDebounce = new Map(); // calKey → last-call timestamp, prevents Gemini from looping tool calls
 const CALENDAR_DEBOUNCE_MS = 12000;  // Ignore duplicate calendar calls within 12s
+let _emailInFlight = false;          // Mutex: only one email flow at a time — blocks Gemini's tendency to loop send_email
+let _emailLastCompletedAt = 0;       // Timestamp when last email flow finished — enforces a cooldown
+let _emailModeActive = false;        // True while user is in email mode (contacts panel open, post-send loop)
+let _listContactsLastAt = 0;         // Timestamp of last list_contacts call — prevents looping
+const LIST_CONTACTS_COOLDOWN_MS = 30000; // Block repeat list_contacts calls within 30s
 const _codeAgentDebounce = new Map(); // action → last-call timestamp
 const _macroDebounce = new Map();    // action → last-call timestamp, 8s cooldown per macro action
 const MACRO_DEBOUNCE_MS = 8000;
@@ -39,6 +44,18 @@ const CODE_AGENT_DEBOUNCE_MS = {
     start_session:   10000,
     end_session:     10000,
 };
+const _notesDebounce = new Map(); // action → last-call timestamp
+const NOTES_DEBOUNCE_MS = {
+    create_note:    60000,  // AI generation ~15-30s — block for 60s
+    update_note:    20000,  // AI update ~10s — block for 20s to prevent rapid duplicates
+    search_notes:    4000,
+    list_notes:      4000,
+    open_note:       2000,
+    exit_notes_mode: 4000,
+};
+let _lastImageGenAt = 0;
+const IMAGE_GEN_DEBOUNCE_MS        = 30000; // single image: ~5-10s, block 30s
+const IMAGE_GEN_BATCH_DEBOUNCE_MS  = 90000; // batch: parallel ~15s, block 90s
 
 // ── STORE AUTO-SCAN ────────────────────────────────────────────────────────
 // Shared helper used after both smart_click and open (in store mode).
@@ -158,6 +175,7 @@ async function startLiveSession(mainWindow, automation) {
     _stuckClickCount = 0;
     _lastSmartClickTarget = '';
     _codeAgentDebounce.clear();
+    _notesDebounce.clear();
     if (activeSession) {
         console.log('Live Session already active.');
         return;
@@ -198,6 +216,10 @@ async function startLiveSession(mainWindow, automation) {
                     "   - NEVER call more than once per app. If cooldown returns Skipped, do NOT retry.\n\n" +
 
                     "2. control_browser — ONLY for these exact browser commands:\n" +
+                    "   ⚠️ NEVER call control_browser when the user is talking about NOTES. If the user says anything like:\n" +
+                    "   'open my note', 'show me the note about X', 'open the note about X', 'find my note on X',\n" +
+                    "   'open that recipe note', 'pull up my notes', 'the note I made about X' → use notes_action, NOT control_browser.\n" +
+                    "   Notes are on the user's computer, not on the internet. NEVER Google-search for a note name.\n" +
                     "   - 'scroll down' / 'scroll up' → action='scroll', direction='down' or 'up'\n" +
                     "   - 'search for X on google' / 'go to website X' / 'open X in the browser' → action='open', query='X'\n" +
                     "   - 'play X on youtube' / 'search youtube for X' → action='search_youtube', query='X'\n" +
@@ -289,14 +311,23 @@ async function startLiveSession(mainWindow, automation) {
                     "STEP 5 — ADD TO CART: User says 'add to cart' / 'buy this' / 'add to bag' → smart_click 'Add to Bag' or 'Add to Cart'. " +
                     "If any option is missing, ask for it first, then click.\n\n" +
 
-                    "6. send_email — ONLY when user explicitly says 'send an email', 'email [person]', 'write an email to', or 'draft an email'.\n" +
-                    "   - Triggers: 'send Bryan an email saying the demo is ready', 'email jim@csulb.edu about the pitch'\n" +
-                    "   - NEVER triggers for: questions, topics, or anything that doesn't involve actively sending a message\n" +
-                    "   - CONFIRMATION FLOW: The tool will ask you to confirm before sending. When it returns a confirmation question, speak it out loud and wait for the user.\n" +
-                    "     If user says yes/send/confirm → re-call send_email with confirmed=true and recipient_email set to the resolved address.\n" +
-                    "     If user says no/cancel/stop → say 'Got it, email cancelled.' Do NOT re-call send_email.\n" +
-                    "   - DISAMBIGUATION: If the tool returns a numbered list of contacts, speak the list and wait. When user picks, re-call with selected_index set.\n" +
-                    "   - WORD-BY-WORD: If the tool asks for a username or domain, speak the question, listen, then re-call with recipient_email set to what they said.\n\n" +
+                    "6. EMAIL MODE — a focused mode for sending emails. Stays active until the user says they are done.\n" +
+                    "   ENTERING EMAIL MODE:\n" +
+                    "   STEP 1 — Call list_contacts FIRST to show the contacts panel.\n" +
+                    "   STEP 2 — Ask: 'Who would you like to email?' and wait for a name.\n" +
+                    "   STEP 3 — Ask: 'What would you like to say?' and let the user describe their intent.\n" +
+                    "   STEP 4 — Call send_email with recipient_name and message_intent.\n" +
+                    "   STEP 5 — Read back the subject and address confirmation: 'Should I send it?'\n" +
+                    "   STEP 6 — If user confirms → re-call send_email with confirmed=true.\n" +
+                    "   AFTER SENDING (stay in email mode):\n" +
+                    "   STEP 7 — Say 'Email sent!' then ask: 'Would you like to send another email, or are you all done?'\n" +
+                    "   STEP 8a — If user wants ANOTHER email: call control_contacts_panel with action='close_browser_keep_contacts'. Then ask 'Who would you like to email next?' and go back to STEP 3.\n" +
+                    "   STEP 8b — If user is DONE: call control_contacts_panel with action='close_email_mode'. Say 'All done! Back to normal.' Do NOT call any other tool.\n" +
+                    "   SCROLLING CONTACTS: If user says 'scroll up', 'scroll down', 'show more', 'go up/down' → call control_contacts_panel with action='scroll_up' or 'scroll_down'.\n" +
+                    "   - AUTH: If the tool returns auth_required → tell the user to run npm run setup-google.\n" +
+                    "   - CANCEL: If user says cancel/stop at any time → call control_contacts_panel with action='close_email_mode'.\n" +
+                    "   - DISAMBIGUATION: If tool returns a numbered list, speak it and wait. Re-call with selected_index.\n" +
+                    "   - WORD-BY-WORD: If tool asks for username or domain, speak the question and re-call with recipient_email.\n\n" +
 
                     "7. calendar_action — ONLY for explicit calendar operations: checking schedule, creating events, cancelling events, checking availability.\n" +
                     "   - get_events triggers: 'what's on my calendar', 'what do I have this week', 'what's my schedule', 'what's my next meeting'\n" +
@@ -332,6 +363,79 @@ async function startLiveSession(mainWindow, automation) {
                     "   - The browser shows the live preview — you can still use control_browser to navigate inside it.\n" +
                     "   - Speak progress naturally: 'Generating your project…', 'Installing dependencies…', 'Starting the server…'\n" +
                     "   - User may speak any language — always respond in their language; use English for tool parameter values.\n\n" +
+
+                    "9. notes_action — Nova Notes: search, view, create, and update personal notes stored on the user's computer.\n" +
+                    "   ╔══ CRITICAL: ANY mention of a note/notes the user HAS → notes_action. NEVER browser. ══╗\n" +
+                    "   'open my note about X', 'show me the note on X', 'open that note I made', 'find my recipe note',\n" +
+                    "   'pull up my notes', 'the note about ají de gallina' → ALWAYS notes_action, NEVER control_browser.\n" +
+                    "   Notes live on the user's computer. NEVER search Google for a note name.\n" +
+                    "   ╚══════════════════════════════════════════════════════════════════════════════════════╝\n\n" +
+                    "   ACTIVATION TRIGGERS: 'look at my notes', 'find my note about X', 'show my notes', 'check my notes',\n" +
+                    "   'open my note about X', 'open that note', 'show me that note', 'the note I created about X',\n" +
+                    "   'create a note', 'write a note', 'make a note', 'take a note', 'save a note', 'I want to take notes',\n" +
+                    "   'help me write a note about X', 'create notes on X', 'note this down', 'write this down'\n" +
+                    "   UPDATE TRIGGERS (when in notes mode): 'change this', 'update the note', 'add more about X',\n" +
+                    "   'fix this section', 'rewrite the part about X', 'add X to the note'\n" +
+                    "   EXIT TRIGGER: 'I am done taking notes' → call exit_notes_mode\n\n" +
+                    "   Actions:\n" +
+                    "   - list_notes: Show all notes. User asks to 'show notes', 'see my notes', 'what notes do I have'.\n" +
+                    "     ⚠️ After list_notes returns, just READ OUT the note titles. Do NOT call open_note.\n" +
+                    "     WAIT for the user to explicitly say which note they want to open.\n" +
+                    "   - search_notes: Use when user describes a note by topic. Pass query=<what user said>.\n" +
+                    "     The tool will return the ACTUAL note titles — always say the exact title back to the user.\n" +
+                    "     Example: user says 'open my ají de gallina note' → search_notes, query='ají de gallina'\n" +
+                    "     The result will say 'Found your note: \"Receta de Ají de Gallina\"' — repeat that exact title to the user.\n" +
+                    "     ⚠️ After search_notes returns multiple results, read out the titles and WAIT for user to pick one.\n" +
+                    "     Only if the tool auto-opens one (result says 'Opening it now'), then it is already open.\n" +
+                    "   - open_note: Use ONLY when user explicitly asks to open or read a specific note by name.\n" +
+                    "     ⚠️ NEVER call open_note automatically after list_notes or search_notes.\n" +
+                    "     ⚠️ NEVER call open_note more than ONCE per user request. Open exactly ONE note.\n" +
+                    "     If a note is already open and user asks for a different one, call open_note for the NEW note only — the old one closes automatically.\n" +
+                    "     Pass title=<exact title as the user said it>. The system fuzzy-matches.\n" +
+                    "   - create_note: Create a new note. FIRST ask: 'What do you want to write in the note?' then wait for user to describe it.\n" +
+                    "     Pass title=<topic name> and user_request=<full description of what to write>.\n" +
+                    "     While creating: tell user 'I am writing your note now, just a moment.'\n" +
+                    "     After creating: show the result and ask for feedback. Stay in notes mode.\n" +
+                    "   - update_note: Update current note. Pass title=<note title> and user_request=<what to change>.\n" +
+                    "     RENAME RULE: Pass new_title=<new title> when EITHER:\n" +
+                    "       (a) User explicitly asks to rename or retitle the note (e.g., 'rename this to X', 'change the title to X'), OR\n" +
+                    "       (b) The update changes the topic significantly enough that the old title no longer fits.\n" +
+                    "     Leave new_title empty if the title should stay the same.\n" +
+                    "   - exit_notes_mode: Call ONLY when user says exactly 'I am done taking notes'.\n\n" +
+                    "   NOTES MODE RULES:\n" +
+                    "   - When notes mode is active (after create_note or when reviewing a note), ALL change requests → update_note.\n" +
+                    "   - Stay focused on the note until user says 'I am done taking notes' — always remind them of this exit phrase.\n" +
+                    "   - For create_note: if user just says 'create a note' without content, ask: 'What would you like me to write?' then wait.\n" +
+                    "   - Nova uses its AI knowledge to write high-quality notes (how-tos, essays, poems, code notes, etc.).\n" +
+                    "   - After create/update succeeds, ALWAYS say what was done and remind user to say 'I am done taking notes' to exit.\n\n" +
+
+                    "10. generate_image — Generate one or multiple AI images using Imagen and save them to the Desktop.\n" +
+                    "   TRIGGER PHRASES: 'generate an image', 'create a picture', 'draw me', 'make an image of', 'create art',\n" +
+                    "   'generate art', 'make a wallpaper', 'create an illustration', 'make a poster', 'draw this',\n" +
+                    "   'generate multiple images', 'create a set of images', 'I need images of X, Y, and Z'\n\n" +
+                    "   ╔══ MANDATORY CONVERSATION FLOW — always ask BEFORE calling ══╗\n" +
+                    "   STEP 1 — Ask style: 'What style? Realistic, cartoon, anime, futuristic, fantasy,\n" +
+                    "     oil painting, watercolor, sketch, cyberpunk, abstract, or 3D render?'\n" +
+                    "   STEP 2 — Ask mood (ONLY if not obvious): 'Mood? Dark, bright, dramatic, calm,\n" +
+                    "     mysterious, or epic?' — SKIP if the subject makes the mood clear.\n" +
+                    "   STEP 3 — Ask orientation: 'Square, landscape (wide), or portrait (tall)?'\n" +
+                    "   ╚═══════════════════════════════════════════════════════════════╝\n\n" +
+                    "   SINGLE IMAGE — prompt is the full subject description:\n" +
+                    "   generate_image({ prompt: 'full description', style, aspect_ratio, mood?, extra_details?, filename_hint? })\n\n" +
+                    "   BATCH MODE — when user asks for multiple images of the SAME style:\n" +
+                    "   ╔══ USE subjects ARRAY ══╗\n" +
+                    "   - prompt: shared visual context / framing applied to all (e.g. 'head-and-shoulders professional portrait, soft studio lighting, clean background')\n" +
+                    "   - subjects: array of distinct subjects, one per image (e.g. ['a university student with a backpack', 'a software developer at a laptop', 'a knowledge worker in an office', 'a person in a wheelchair'])\n" +
+                    "   - style / aspect_ratio / mood / extra_details: shared across all images\n" +
+                    "   - Max 6 subjects per call\n" +
+                    "   Example batch call: generate_image({ prompt: 'professional portrait, clean background', subjects: ['a student', 'a developer', 'a nurse'], style: 'realistic', aspect_ratio: 'portrait' })\n" +
+                    "   ╚══════════════════════╝\n\n" +
+                    "   RULES:\n" +
+                    "   - NEVER call without asking style and orientation first.\n" +
+                    "   - Single: say 'Generating your [style] image, this takes a few seconds.'\n" +
+                    "   - Batch: say 'Generating [N] [style] images in parallel, this will take about 15 seconds.'\n" +
+                    "   - When done, tell the user all images are on their Desktop.\n" +
+                    "   - Do NOT call generate_image again until current generation finishes.\n\n" +
 
                     "== LANGUAGE ==\n" +
                     "Always respond in the user's language. Tool parameter values must be in English.",
@@ -471,6 +575,21 @@ async function startLiveSession(mainWindow, automation) {
                                 }
                             },
                             {
+                                name: "control_contacts_panel",
+                                description: "Control the contacts panel and email mode. Use scroll_up/scroll_down when user asks to scroll through contacts. Use close_browser_keep_contacts after sending an email when user wants to send another. Use close_email_mode when user is done sending emails.",
+                                parameters: {
+                                    type: "OBJECT",
+                                    properties: {
+                                        action: {
+                                            type: "STRING",
+                                            enum: ["scroll_up", "scroll_down", "close_browser_keep_contacts", "close_email_mode"],
+                                            description: "scroll_up/scroll_down: scroll contacts list; close_browser_keep_contacts: close browser, keep contacts panel open for next email; close_email_mode: user is done, close everything and return to normal."
+                                        }
+                                    },
+                                    required: ["action"]
+                                }
+                            },
+                            {
                                 name: "calendar_action",
                                 description: "Read or modify the user's Google Calendar. Use for any request involving schedules, meetings, events, availability, or time blocking. Actions: get_events (read calendar), create_event (add event/meeting/block), delete_event (cancel event), check_availability (find free slots). NEVER call for general questions — only for explicit calendar operations.",
                                 parameters: {
@@ -559,6 +678,37 @@ async function startLiveSession(mainWindow, automation) {
                                 }
                             },
                             {
+                                name: "notes_action",
+                                description: "Nova Notes — search, view, create, and update personal notes stored on the user's machine. MUST USE for ANY note-related request. CRITICAL: When user says 'open my note about X', 'find the note about X', 'show that note', 'pull up my notes' — call notes_action with action=search_notes and query=<topic>. NEVER call control_browser for notes. Notes are local files, not web pages. Triggers: 'check my notes', 'find a note about X', 'open my note about X', 'create a note', 'write a note on X', 'take notes', 'show me the note I made about X', 'update the note'. Stays in notes mode until user says 'I am done taking notes'.",
+                                parameters: {
+                                    type: "OBJECT",
+                                    properties: {
+                                        action: {
+                                            type: "STRING",
+                                            enum: ["list_notes", "search_notes", "open_note", "create_note", "update_note", "exit_notes_mode"],
+                                            description: "Notes action to perform."
+                                        },
+                                        title: {
+                                            type: "STRING",
+                                            description: "Note title (for open_note, create_note, update_note)."
+                                        },
+                                        query: {
+                                            type: "STRING",
+                                            description: "Search query or hint to find a note (for search_notes). Use exactly what the user described."
+                                        },
+                                        user_request: {
+                                            type: "STRING",
+                                            description: "Full description of what to write or what to change (for create_note and update_note). Be as detailed as the user was."
+                                        },
+                                        new_title: {
+                                            type: "STRING",
+                                            description: "New title for the note (for update_note only). Pass this when: (1) the user explicitly asks to rename or retitle the note, OR (2) the update changes the topic significantly enough that the old title no longer fits. Leave empty if the title stays the same."
+                                        }
+                                    },
+                                    required: ["action"]
+                                }
+                            },
+                            {
                                 name: "analyze_screen",
                                 description: "Take a screenshot and use Gemini Vision to analyze what is currently on the user's screen. Use when user says 'summarize this', 'what\\'s on my screen', 'what am I looking at', 'read this', 'explain this', 'describe my screen', 'what does this say', 'tell me about this page'. Do NOT use for general questions that don't require seeing the screen.",
                                 parameters: {
@@ -570,6 +720,47 @@ async function startLiveSession(mainWindow, automation) {
                                         }
                                     },
                                     required: ["question"]
+                                }
+                            },
+                            {
+                                name: "generate_image",
+                                description: "Generates one or more AI images using Imagen and saves them to the user's Desktop. Supports SINGLE image and BATCH (multiple subjects, same style). ONLY call AFTER gathering style and orientation. TRIGGERS: 'generate an image', 'create a picture', 'draw me', 'make an image', 'create art', 'make a wallpaper', 'generate multiple images', 'create a set of images'. CONVERSATION FLOW before calling: (1) Ask style if not given (realistic/cartoon/anime/futuristic/fantasy/oil_painting/watercolor/sketch/cyberpunk/abstract/3d_render). (2) Ask mood only if not obvious. (3) Ask orientation (square/landscape/portrait). BATCH: when user asks for multiple images of the same style (e.g. 'portraits of a student, a developer, a designer'), use the subjects array — each entry is one distinct subject/variation, all sharing the same style/mood/orientation. Max 6 subjects per call.",
+                                parameters: {
+                                    type: "OBJECT",
+                                    properties: {
+                                        prompt: {
+                                            type: "STRING",
+                                            description: "Shared visual context / base description applied to ALL images. For batch: describe the shared setting, lighting, framing, and style details. For single: full subject description."
+                                        },
+                                        subjects: {
+                                            type: "ARRAY",
+                                            items: { type: "STRING" },
+                                            description: "BATCH MODE ONLY. List of distinct subjects/variations to generate as separate images, all sharing the same style. Each string is one subject (e.g. 'a student with a backpack', 'a software developer at a desk', 'a person in a wheelchair'). Max 6 items. When provided, each subject is combined with prompt to produce one image. Leave empty for single-image mode."
+                                        },
+                                        style: {
+                                            type: "STRING",
+                                            enum: ["realistic", "cartoon", "anime", "futuristic", "fantasy", "oil_painting", "watercolor", "sketch", "cyberpunk", "abstract", "3d_render"],
+                                            description: "Visual style applied to ALL images in the batch."
+                                        },
+                                        aspect_ratio: {
+                                            type: "STRING",
+                                            enum: ["square", "landscape", "portrait"],
+                                            description: "Image orientation for ALL images: square (1:1), landscape (16:9), portrait (9:16)."
+                                        },
+                                        mood: {
+                                            type: "STRING",
+                                            description: "Shared mood for all images: dark, bright, dramatic, calm, mysterious, or epic. Leave empty if described in prompt."
+                                        },
+                                        extra_details: {
+                                            type: "STRING",
+                                            description: "Shared additional details applied to every image: colors, camera angle, lighting, background, etc."
+                                        },
+                                        filename_hint: {
+                                            type: "STRING",
+                                            description: "Short prefix for filenames (e.g. 'portrait', 'fantasy_char'). Batch images are auto-numbered."
+                                        }
+                                    },
+                                    required: ["style", "aspect_ratio"]
                                 }
                             }
                         ]
@@ -1089,27 +1280,140 @@ async function startLiveSession(mainWindow, automation) {
                                 }
 
                             } else if (call.name === 'list_contacts') {
-                                activeSession.sendRealtimeInput({
-                                    functionResponses: [{
-                                        id: call.id,
-                                        response: { status: 'Processing', message: 'Fetching your contacts...' }
-                                    }]
-                                });
+                                const _nowContacts = Date.now();
+                                const _msSinceContacts = _nowContacts - _listContactsLastAt;
+
+                                // Block repeated list_contacts calls — contacts panel is already visible.
+                                if (_msSinceContacts < LIST_CONTACTS_COOLDOWN_MS && automationRef && automationRef.isContactsPanelOpen && automationRef.isContactsPanelOpen()) {
+                                    console.log(`📋 [Contacts] Debounced duplicate list_contacts call (${_msSinceContacts}ms since last)`);
+                                    try {
+                                        activeSession.sendRealtimeInput({
+                                            functionResponses: [{
+                                                id: call.id,
+                                                response: { status: 'already_shown', message: 'Contacts panel is already visible. Do NOT call list_contacts again. Ask the user who they want to email.' }
+                                            }]
+                                        });
+                                        activeSession.sendRealtimeInput({
+                                            text: `[CONTACTS ALREADY VISIBLE] The contacts panel is still open. Do NOT call list_contacts again. Ask the user: "Who would you like to email?" and wait for their answer. Then call send_email with the name they say.`
+                                        });
+                                    } catch (_) {}
+                                    return;
+                                }
+
+                                _listContactsLastAt = _nowContacts;
+                                try {
+                                    activeSession.sendRealtimeInput({
+                                        functionResponses: [{
+                                            id: call.id,
+                                            response: { status: 'Processing', message: 'Fetching your contacts...' }
+                                        }]
+                                    });
+                                } catch (_) {}
 
                                 if (automationRef && automationRef.listContactsTool) {
                                     automationRef.listContactsTool(call.args || {}).then((result) => {
                                         if (!activeSession) return;
-                                        const instr = result.status === 'success'
-                                            ? `[CONTACTS LIST] Read out these contacts to the user naturally: ${result.speak}. ` +
-                                              `Also mention they can say "send an email to [name]" to email any of them. Do NOT call any tool.`
-                                            : `[CONTACTS EMPTY] ${result.speak} Speak this out loud. Do NOT call any tool.`;
+                                        let instr;
+                                        if (result.status === 'success') {
+                                            const nameList = result.contacts
+                                                .map((c, i) => `${i + 1}. ${c.displayName}`)
+                                                .join(', ');
+                                            instr =
+                                                `[CONTACTS PANEL SHOWN] The contacts panel is now visible. ` +
+                                                `EXACT contact names (use these EXACTLY when calling send_email): ${nameList}. ` +
+                                                `Say out loud: "Here are your contacts. Who would you like to email?" ` +
+                                                `When the user says a name, match it to the closest name from the list and pass THAT exact name to send_email. ` +
+                                                `Do NOT call list_contacts again — the panel is already open.`;
+                                        } else if (result.status === 'empty') {
+                                            instr =
+                                                `[NO CONTACTS] ${result.speak} ` +
+                                                `If Google isn't authorized yet, tell the user to run npm run setup-google in a terminal, then restart Nova. Do NOT call any tool.`;
+                                        } else {
+                                            instr = `[CONTACTS ERROR] ${result.speak} Do NOT call any tool.`;
+                                        }
                                         try { activeSession.sendRealtimeInput({ text: instr }); } catch (e) { /* ignore */ }
                                     }).catch(() => {});
+                                }
+
+                            } else if (call.name === 'control_contacts_panel') {
+                                const { action } = call.args;
+                                console.log(`📋 [Contacts Panel] action="${action}"`);
+
+                                // Acknowledge immediately
+                                try {
+                                    activeSession.sendRealtimeInput({
+                                        functionResponses: [{ id: call.id, response: { status: 'ok', action } }]
+                                    });
+                                } catch (_) {}
+
+                                if (action === 'scroll_up' || action === 'scroll_down') {
+                                    if (automationRef && automationRef.scrollContactsPanel) {
+                                        automationRef.scrollContactsPanel(action);
+                                    }
+                                    try {
+                                        activeSession.sendRealtimeInput({
+                                            text: `[CONTACTS SCROLLED] Panel scrolled ${action === 'scroll_up' ? 'up' : 'down'}. ` +
+                                                  `Say something natural like "scrolled" or "here you go" and wait for the user to pick a contact or scroll again. Do NOT call any tool.`
+                                        });
+                                    } catch (_) {}
+
+                                } else if (action === 'close_browser_keep_contacts') {
+                                    // Close browser but keep contacts panel open for next email
+                                    if (automationRef && automationRef.closeBrowser) automationRef.closeBrowser();
+                                    try {
+                                        activeSession.sendRealtimeInput({
+                                            text: `[BROWSER CLOSED - EMAIL MODE CONTINUES] Closed the sent folder. Contacts panel is still visible. ` +
+                                                  `Say: "Alright! Who would you like to email next?" and wait for them to say a name from the contacts panel. ` +
+                                                  `When they say a name, call send_email with that name. Do NOT call list_contacts again — contacts are already showing.`
+                                        });
+                                    } catch (_) {}
+
+                                } else if (action === 'close_email_mode') {
+                                    _emailModeActive = false;
+                                    _emailInFlight = false;
+                                    _emailLastCompletedAt = Date.now(); // keep cooldown active to block stale calls from the closing session
+                                    if (automationRef && automationRef.closeBrowser) automationRef.closeBrowser();
+                                    if (automationRef && automationRef.hideContactsPanel) automationRef.hideContactsPanel();
+                                    if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+                                        mainWindowRef.webContents.send('show-status-message', '');
+                                    }
+                                    try {
+                                        activeSession.sendRealtimeInput({
+                                            text: `[EMAIL MODE ENDED] Contacts panel and browser closed. ` +
+                                                  `Say: "All done! Back to normal mode. Is there anything else I can help you with?" Do NOT call any tool.`
+                                        });
+                                    } catch (_) {}
                                 }
 
                             } else if (call.name === 'send_email') {
                                 const _emailArgs = call.args;
                                 console.log(`📧 [Email Tool] recipient="${_emailArgs.recipient_name}" confirmed=${!!_emailArgs.confirmed} intent="${_emailArgs.message_intent}"`);
+
+                                // Block duplicate/looping calls: only one email flow at a time.
+                                // IMPORTANT: confirmed=true calls (user said "yes") are ALWAYS allowed
+                                // through — they are the intentional confirmation step, never duplicates.
+                                // Only unconfirmed calls are subject to the mutex and cooldown.
+                                const _isConfirmation = !!_emailArgs.confirmed;
+                                const _emailCooldownMs = 8000;
+                                const _confirmCooldownMs = 6000; // short window after a send to block stale confirmed=true duplicates
+                                const _timeSinceLast = Date.now() - _emailLastCompletedAt;
+                                const _effectiveCooldown = _isConfirmation ? _confirmCooldownMs : _emailCooldownMs;
+                                if (_emailInFlight || _timeSinceLast < _effectiveCooldown) {
+                                    console.log(`📧 [Email] Blocked duplicate call (inFlight=${_emailInFlight}, msSinceLast=${_timeSinceLast}, cooldown=${_effectiveCooldown})`);
+                                    try {
+                                        activeSession.sendRealtimeInput({
+                                            functionResponses: [{
+                                                id: call.id,
+                                                response: {
+                                                    status: 'already_processing',
+                                                    message: 'An email is already being processed. Do NOT call send_email again. Stay quiet and wait for the current flow to finish.'
+                                                }
+                                            }]
+                                        });
+                                    } catch (_) {}
+                                    return;
+                                }
+                                _emailInFlight = true;
 
                                 // Acknowledge immediately so Nova says something while the async
                                 // contact lookup runs. The real instruction (confirm / send / ask)
@@ -1124,8 +1428,10 @@ async function startLiveSession(mainWindow, automation) {
                                     }]
                                 });
 
-                                // Run async: resolve contact → confirm → generate body → send
-                                if (automationRef && automationRef.sendEmailTool) {
+                                // If the contacts panel isn't already open, auto-fetch contacts
+                                // first so the user always sees the panel before email is sent.
+                                const _runEmail = (extraNames) => {
+                                    if (!(automationRef && automationRef.sendEmailTool)) return;
                                     automationRef.sendEmailTool(_emailArgs).then((result) => {
                                         if (!activeSession) return;
                                         const speakText = result.speak || result.message || 'Email processed.';
@@ -1133,18 +1439,34 @@ async function startLiveSession(mainWindow, automation) {
 
                                         switch (result.status) {
                                             case 'success':
-                                                instr = `[EMAIL SENT] ${speakText} Speak this confirmation out loud now. Do NOT call any tool.`;
+                                                _emailModeActive = true;
+                                                if (automationRef && automationRef.openBrowser) {
+                                                    automationRef.openBrowser('https://mail.google.com/mail/u/0/#sent');
+                                                }
+                                                instr =
+                                                    `[EMAIL SENT - EMAIL MODE ACTIVE] ${speakText} ` +
+                                                    `Say: "Email sent! I've opened your sent folder to confirm." ` +
+                                                    `Then ask: "Would you like to send another email, or are you all done?" ` +
+                                                    `Wait for their answer. ` +
+                                                    `If they want to send ANOTHER: call control_contacts_panel with action="close_browser_keep_contacts", then ask who they want to email next. ` +
+                                                    `If they are DONE: call control_contacts_panel with action="close_email_mode". ` +
+                                                    `Do NOT call send_email yet — wait for their response first.`;
                                                 break;
                                             case 'draft_saved':
                                                 instr = `[EMAIL DRAFT SAVED] ${speakText} Speak this out loud now. Do NOT call any tool.`;
                                                 break;
                                             case 'needs_confirmation':
                                                 instr =
-                                                    `[EMAIL CONFIRM NEEDED] Speak this out loud to the user: "${speakText}" — then listen for their response. ` +
-                                                    `If they say yes, confirm, or send it: call send_email again with confirmed=true, ` +
+                                                    `[EMAIL CONFIRM NEEDED] Speak this EXACT sentence to the user: "${speakText}" — then wait for their answer. ` +
+                                                    `If they say yes/sure/ok/send it/confirm: call send_email again with these EXACT args: ` +
+                                                    `confirmed=true, ` +
+                                                    `recipient_name="${_emailArgs.recipient_name || ''}", ` +
                                                     `recipient_email="${result.recipient_email || ''}", ` +
-                                                    `and all other original args (recipient_name, subject, message_intent, draft_only) exactly the same. ` +
-                                                    `If they say no, cancel, or stop: say "Got it, email cancelled." and do NOT call send_email again.`;
+                                                    `subject="${result.confirmed_subject || _emailArgs.subject || ''}", ` +
+                                                    `message_intent="${_emailArgs.message_intent || ''}", ` +
+                                                    `draft_only=${!!_emailArgs.draft_only}. ` +
+                                                    `If they say no/cancel/stop: say "Got it, email cancelled." and do NOT call send_email again.` +
+                                                    (extraNames ? ` [Known contacts: ${extraNames}]` : '');
                                                 break;
                                             case 'needs_disambiguation':
                                                 instr =
@@ -1167,11 +1489,12 @@ async function startLiveSession(mainWindow, automation) {
                                                 break;
                                             case 'auth_required':
                                                 instr =
-                                                    `[EMAIL AUTH REQUIRED] ${speakText} ` +
-                                                    `Tell the user they need to authorize Gmail access by running npm run setup-google in a terminal, then restarting Nova.`;
+                                                    `[EMAIL AUTH REQUIRED] Tell the user: "Gmail isn't authorized yet. ` +
+                                                    `Please open a terminal in the robot-widget folder and run: npm run setup-google — ` +
+                                                    `it will open a browser to grant access to Gmail, Calendar, and Contacts. ` +
+                                                    `After that, restart Nova and everything will work." Do NOT call any tool.`;
                                                 break;
                                             default:
-                                                // 'error', legacy 'needs_clarification', or any unknown status
                                                 instr = result.status === 'needs_clarification'
                                                     ? `[EMAIL NEEDS INPUT] ${speakText} Ask the user for the missing information.`
                                                     : `[EMAIL ERROR] ${speakText} Tell the user what went wrong.`;
@@ -1181,8 +1504,13 @@ async function startLiveSession(mainWindow, automation) {
                                             activeSession.sendRealtimeInput({ text: instr });
                                         } catch (e) {
                                             console.error('📧 [Email] Failed to inject result:', e.message);
+                                        } finally {
+                                            _emailInFlight = false;
+                                            _emailLastCompletedAt = Date.now();
                                         }
                                     }).catch((e) => {
+                                        _emailInFlight = false;
+                                        _emailLastCompletedAt = Date.now();
                                         console.error('📧 [Email] Unexpected error:', e.message);
                                         if (activeSession) {
                                             activeSession.sendRealtimeInput({
@@ -1190,6 +1518,19 @@ async function startLiveSession(mainWindow, automation) {
                                             });
                                         }
                                     });
+                                };
+
+                                // Always show contacts panel first (guaranteed step)
+                                if (automationRef && automationRef.isContactsPanelOpen && !automationRef.isContactsPanelOpen() && automationRef.listContactsTool) {
+                                    automationRef.listContactsTool({ limit: 20 }).then((contactResult) => {
+                                        const nameList = (contactResult.contacts || []).map(c => c.displayName).join(', ');
+                                        _runEmail(nameList);
+                                    }).catch((e) => {
+                                        console.error('📧 [Email] listContacts prefetch failed:', e.message);
+                                        _runEmail(null);
+                                    });
+                                } else {
+                                    _runEmail(null);
                                 }
 
                             } else if (call.name === 'calendar_action') {
@@ -1468,6 +1809,108 @@ async function startLiveSession(mainWindow, automation) {
                                     });
                                 }
 
+                            } else if (call.name === 'notes_action') {
+                                const { action } = call.args;
+                                // open_note uses a single shared key so only ONE note can open at a time
+                                const notesKey = action === 'open_note' ? 'open_note' : `${action}:${call.args.title || ''}`;
+                                const nowNotes = Date.now();
+                                const notesCooldown = NOTES_DEBOUNCE_MS[action] || 10000;
+
+                                if (nowNotes - (_notesDebounce.get(notesKey) || 0) < notesCooldown) {
+                                    console.log(`📝 [Notes] Debounced: ${notesKey}`);
+                                    try {
+                                        activeSession.sendRealtimeInput({
+                                            functionResponses: [{ id: call.id, response: {
+                                                status: 'already_running',
+                                                message: 'This notes action is already running. Tell the user to wait — do NOT call notes_action again.'
+                                            }}]
+                                        });
+                                    } catch (_) {}
+                                    return;
+                                }
+                                _notesDebounce.set(notesKey, nowNotes);
+
+                                console.log(`📝 [Notes] action="${action}" title="${call.args.title || ''}" query="${call.args.query || ''}"`);
+
+                                const notesStatusLabels = {
+                                    list_notes:      'Loading notes...',
+                                    search_notes:    'Searching notes...',
+                                    open_note:       'Opening note...',
+                                    create_note:     'Writing note...',
+                                    update_note:     'Updating note...',
+                                    exit_notes_mode: 'Closing notes...',
+                                };
+                                if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+                                    mainWindowRef.webContents.send('show-status-message', notesStatusLabels[action] || 'Working...');
+                                }
+
+                                // Immediate acknowledge so Nova can speak while work runs
+                                const notesAckMessages = {
+                                    list_notes:      `Say out loud: "Let me pull up your notes." Do NOT call notes_action again.`,
+                                    search_notes:    `Say out loud: "Let me search through your notes." Do NOT call notes_action again.`,
+                                    open_note:       `Say out loud: "Opening that note for you." Do NOT call notes_action again.`,
+                                    create_note:     `Say out loud right now: "I am writing your note now, just a moment." Do NOT call notes_action again.`,
+                                    update_note:     `Say out loud right now: "Updating your note now, one moment." Do NOT call notes_action again.`,
+                                    exit_notes_mode: `Say out loud: "Closing notes mode." Do NOT call notes_action again.`,
+                                };
+
+                                try {
+                                    activeSession.sendRealtimeInput({
+                                        functionResponses: [{
+                                            id: call.id,
+                                            response: {
+                                                status: 'ok',
+                                                message: notesAckMessages[action] || `Acknowledged. Say briefly what you are doing. Do NOT call notes_action again.`
+                                            }
+                                        }]
+                                    });
+                                } catch (_) {}
+
+                                if (automationRef && automationRef.notesActionTool) {
+                                    automationRef.notesActionTool(call.args).then((result) => {
+                                        if (!activeSession) return;
+                                        if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+                                            mainWindowRef.webContents.send('show-status-message', '');
+                                        }
+                                        const speakText = result.speak || 'Done.';
+                                        let prompt;
+                                        if (result.status === 'error') {
+                                            prompt = `[NOTES ERROR] ${speakText} Tell the user what went wrong right now. Do NOT call any tool.`;
+                                        } else if (result.status === 'not_found') {
+                                            prompt = `[NOTES NOT FOUND] ${speakText} Ask which note they meant — the panel shows options. Say this out loud now. Do NOT call any tool.`;
+                                        } else if (result.status === 'created') {
+                                            prompt = `[NOTE CREATED] ${speakText} Say this out loud to the user right now. Do NOT call any tool.`;
+                                        } else if (result.status === 'updated') {
+                                            prompt = `[NOTE UPDATED] ${speakText} Say this out loud to the user right now. Do NOT call any tool.`;
+                                        } else if (result.status === 'exited') {
+                                            prompt = `[NOTES MODE EXITED] ${speakText} Say this out loud and return to normal conversation. Do NOT call any tool.`;
+                                        } else {
+                                            prompt = `[NOTES RESULT] ${speakText} Say this out loud to the user right now. Do NOT call any tool.`;
+                                        }
+                                        // Delay for fast ops (list/search/open complete in <100ms) so the ack
+                                        // audio has time to start before the result injection arrives.
+                                        const fastOps = ['list_notes', 'search_notes', 'open_note', 'exit_notes_mode'];
+                                        const injectDelay = fastOps.includes(action) ? 700 : 0;
+                                        setTimeout(() => {
+                                            try {
+                                                if (activeSession) activeSession.sendRealtimeInput({ text: prompt });
+                                            } catch (e) {
+                                                console.error('📝 [Notes] Failed to inject result:', e.message);
+                                            }
+                                        }, injectDelay);
+                                    }).catch((e) => {
+                                        console.error('📝 [Notes] Unexpected error:', e.message);
+                                        if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+                                            mainWindowRef.webContents.send('show-status-message', '');
+                                        }
+                                        if (activeSession) {
+                                            try {
+                                                activeSession.sendRealtimeInput({ text: `[NOTES ERROR] ${e.message}. Tell the user there was a problem with their notes. Do NOT call any tool.` });
+                                            } catch (_) {}
+                                        }
+                                    });
+                                }
+
                             } else if (call.name === 'analyze_screen') {
                                 const { question } = call.args;
                                 const nowScreen = Date.now();
@@ -1523,6 +1966,86 @@ async function startLiveSession(mainWindow, automation) {
                                         }
                                     });
                                 }
+
+                            } else if (call.name === 'generate_image') {
+                                const nowImg        = Date.now();
+                                const isBatchCall   = Array.isArray(call.args.subjects) && call.args.subjects.length > 1;
+                                const imgDebounce   = isBatchCall ? IMAGE_GEN_BATCH_DEBOUNCE_MS : IMAGE_GEN_DEBOUNCE_MS;
+                                if (nowImg - _lastImageGenAt < imgDebounce) {
+                                    console.log('🎨 [ImageGen] Debounced — generation already in progress.');
+                                    try {
+                                        activeSession.sendRealtimeInput({
+                                            functionResponses: [{ id: call.id, response: {
+                                                status: 'already_running',
+                                                message: 'Image generation is already in progress. Tell the user to wait — do NOT call generate_image again.'
+                                            }}]
+                                        });
+                                    } catch (_) {}
+                                    return;
+                                }
+                                _lastImageGenAt = nowImg;
+
+                                console.log(`🎨 [ImageGen] prompt="${(call.args.prompt || '').slice(0, 60)}" style=${call.args.style} aspect=${call.args.aspect_ratio}`);
+
+                                const _isBatch  = Array.isArray(call.args.subjects) && call.args.subjects.length > 1;
+                                const _imgCount = _isBatch ? Math.min(call.args.subjects.length, 6) : 1;
+                                const _badgeMsg = _isBatch ? `✨ Creating ${_imgCount} images...` : '✨ Creating image...';
+                                const _ackMsg   = _isBatch
+                                    ? `Say out loud right now: "Generating ${_imgCount} ${call.args.style || ''} images in parallel — this takes about 15 seconds." Do NOT call generate_image again.`
+                                    : `Say out loud right now: "Generating your ${call.args.style || ''} image now, this will take a few seconds." Do NOT call generate_image again.`;
+
+                                if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+                                    mainWindowRef.webContents.send('show-status-message', _badgeMsg);
+                                    mainWindowRef.webContents.send('image-generating-state', true);
+                                }
+
+                                // Immediate ack so Nova speaks while Imagen runs
+                                try {
+                                    activeSession.sendRealtimeInput({
+                                        functionResponses: [{
+                                            id: call.id,
+                                            response: { status: 'ok', message: _ackMsg }
+                                        }]
+                                    });
+                                } catch (_) {}
+
+                                const _clearImageState = () => {
+                                    if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+                                        mainWindowRef.webContents.send('show-status-message', '');
+                                        mainWindowRef.webContents.send('image-generating-state', false);
+                                    }
+                                };
+
+                                if (automationRef && automationRef.generateImageTool) {
+                                    automationRef.generateImageTool(call.args).then((result) => {
+                                        if (!activeSession) return;
+                                        _clearImageState();
+                                        const speakText = result.speak || 'Done.';
+                                        let injectPrompt;
+                                        if (result.status === 'created') {
+                                            injectPrompt = `[IMAGE CREATED] ${speakText} Say this out loud to the user right now. Do NOT call any tool.`;
+                                        } else if (result.status === 'batch_created') {
+                                            injectPrompt = `[BATCH IMAGES CREATED — ${result.count} images] ${speakText} Say this out loud to the user right now. Do NOT call any tool.`;
+                                        } else {
+                                            injectPrompt = `[IMAGE ERROR] ${speakText} Tell the user right now. Do NOT call any tool.`;
+                                        }
+                                        setTimeout(() => {
+                                            try {
+                                                if (activeSession) activeSession.sendRealtimeInput({ text: injectPrompt });
+                                            } catch (e) {
+                                                console.error('🎨 [ImageGen] Failed to inject result:', e.message);
+                                            }
+                                        }, 500);
+                                    }).catch((e) => {
+                                        console.error('🎨 [ImageGen] Unexpected error:', e.message);
+                                        _clearImageState();
+                                        if (activeSession) {
+                                            try {
+                                                activeSession.sendRealtimeInput({ text: `[IMAGE ERROR] ${e.message}. Tell the user there was a problem generating the image. Do NOT call any tool.` });
+                                            } catch (_) {}
+                                        }
+                                    });
+                                }
                             }
                         }
                     }
@@ -1534,6 +2057,10 @@ async function startLiveSession(mainWindow, automation) {
                 onclose: () => {
                     console.log('🏁 Gemini Live Session Closed.');
                     activeSession = null;
+                    _emailInFlight = false;
+                    _emailLastCompletedAt = 0;
+                    _emailModeActive = false;
+                    _listContactsLastAt = 0;
                     mainWindow.webContents.send('live-session-event', { event: 'closed' });
                 },
             },
@@ -1572,6 +2099,10 @@ function endLiveSession() {
         console.log('🛑 Terminating Live Session...');
         activeSession = null;
     }
+    _emailInFlight = false;
+    _emailLastCompletedAt = 0;
+    _emailModeActive = false;
+    _listContactsLastAt = 0;
 }
 
 function setBrowserOpen(value) {

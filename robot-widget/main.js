@@ -17,6 +17,8 @@ const googleAuth                 = require('./google_auth');
 const { handleSendEmailTool, handleListContactsTool } = require('./gmail');
 const { handleCalendarActionTool } = require('./calendar');
 const codeAgent                  = require('./code_agent');
+const { handleNotesActionTool }  = require('./notes');
+const { handleImageGenerationTool } = require('./image_gen');
 
 // Terminate Chromium's Autoplay sandbox. We are a desktop app, not a website!
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -364,7 +366,9 @@ function createChatWindow() {
 let browserWin = null;
 let isBrowserReady = false;
 let pendingBrowserUrl = null;
-let calendarWin = null;
+let calendarWin  = null;
+let notesWin     = null;
+let contactsWin  = null;
 
 ipcMain.on('browser-ready', () => {
     console.log('📡 Bridge: Browser Agent is ready.');
@@ -777,15 +781,89 @@ const Automation = {
             if (mainWindow) mainWindow.webContents.send('automation-log', msg);
             console.log('[Gmail Tool]', msg);
         };
-        return await handleSendEmailTool(args, null, logFn);
+        const statusLabel = args.confirmed
+            ? '📧 Sending email...'
+            : '✉️ Composing email...';
+        if (mainWindow) mainWindow.webContents.send('show-status-message', statusLabel);
+        try {
+            const result = await handleSendEmailTool(args, null, logFn);
+            if (mainWindow) mainWindow.webContents.send('show-status-message', '');
+            return result;
+        } catch (e) {
+            if (mainWindow) mainWindow.webContents.send('show-status-message', '');
+            throw e;
+        }
     },
 
     listContactsTool: async (args) => {
         const limit = Math.min(Math.max(args?.limit || 10, 1), 30);
         console.log(`[Contacts Tool] Listing up to ${limit} contacts...`);
+        if (mainWindow) mainWindow.webContents.send('show-status-message', '📋 Loading contacts...');
         const result = await handleListContactsTool({ limit });
+        if (mainWindow) mainWindow.webContents.send('show-status-message', '');
         if (mainWindow) mainWindow.webContents.send('automation-log', `📋 Listed ${result.contacts?.length || 0} contacts`);
+        if (result.contacts && result.contacts.length > 0) {
+            Automation.showContactsPanel(result.contacts);
+        }
         return result;
+    },
+
+    // ── Contacts panel (floating window) ─────────────────────────────────
+    showContactsPanel: (contacts) => {
+        if (calendarWin && !calendarWin.isDestroyed()) calendarWin.close();
+        if (notesWin && !notesWin.isDestroyed()) notesWin.close();
+
+        const W = 340, H = 480;
+        const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
+        const novaW  = 130;
+        const gap    = 12;
+        const panelX = Math.max(8, sw - novaW - gap - W);
+        const panelY = Math.max(8, sh - H - 8);
+
+        if (contactsWin && !contactsWin.isDestroyed()) {
+            contactsWin.webContents.send('contacts-data', contacts);
+            return;
+        }
+
+        contactsWin = new BrowserWindow({
+            width: W, height: H,
+            x: panelX, y: panelY,
+            transparent: true, frame: false, hasShadow: false,
+            alwaysOnTop: true, skipTaskbar: true, resizable: false,
+            ...(process.platform === 'linux' ? { type: 'toolbar' } : {}),
+            webPreferences: { nodeIntegration: true, contextIsolation: false }
+        });
+        contactsWin.setAlwaysOnTop(true, 'screen-saver');
+        contactsWin.loadFile(path.join(__dirname, 'contacts_panel.html'));
+        contactsWin.once('ready-to-show', () => {
+            contactsWin.show();
+            setTimeout(() => {
+                if (contactsWin && !contactsWin.isDestroyed()) {
+                    contactsWin.webContents.send('contacts-data', contacts);
+                }
+            }, 150);
+        });
+        contactsWin.on('closed', () => { contactsWin = null; });
+    },
+
+    hideContactsPanel: () => {
+        if (contactsWin && !contactsWin.isDestroyed()) contactsWin.close();
+    },
+
+    isContactsPanelOpen: () => {
+        return !!(contactsWin && !contactsWin.isDestroyed());
+    },
+
+    scrollContactsPanel: (direction) => {
+        if (contactsWin && !contactsWin.isDestroyed()) {
+            contactsWin.webContents.send('scroll-contacts', direction);
+        }
+    },
+
+    closeBrowser: () => {
+        if (browserWin && !browserWin.isDestroyed()) {
+            browserWin.close();
+        }
     },
 
     // ── Calendar tool handler ─────────────────────────────────────────────
@@ -799,6 +877,9 @@ const Automation = {
 
     // ── Calendar visual panel (separate floating window) ─────────────────
     showCalendarPanel: (data) => {
+        // Close notes panel if open — only one side panel at a time
+        if (notesWin && !notesWin.isDestroyed()) notesWin.close();
+
         const CAL_W = 320;
         const CAL_H = 480;
         const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
@@ -847,10 +928,10 @@ const Automation = {
 
         calendarWin.on('closed', () => { calendarWin = null; });
 
-        // Auto-dismiss after 45 seconds
+        // Auto-dismiss after 20 seconds
         setTimeout(() => {
             if (calendarWin && !calendarWin.isDestroyed()) calendarWin.close();
-        }, 45000);
+        }, 20000);
     },
 
     // Called by calendar_panel.html when user clicks the close button
@@ -965,6 +1046,74 @@ const Automation = {
         if (mainWindow) mainWindow.webContents.send('automation-log', '🖥️ Analyzing screen...');
         return await analyzeScreen(question);
     },
+
+    // ── Notes panel ───────────────────────────────────────────────────────
+    showNotesPanel: (data) => {
+        // Close calendar panel if open — only one side panel at a time
+        if (calendarWin && !calendarWin.isDestroyed()) calendarWin.close();
+
+        const NOTES_W = 560;
+        const NOTES_H = 700;
+        const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
+        const novaW  = 130;
+        const gap    = 12;
+        const panelX = Math.max(8, sw - novaW - gap - NOTES_W);
+        const panelY = Math.max(8, sh - NOTES_H - 8);
+
+        if (notesWin && !notesWin.isDestroyed()) {
+            notesWin.webContents.send('notes-panel-data', data);
+            return;
+        }
+
+        notesWin = new BrowserWindow({
+            width: NOTES_W, height: NOTES_H,
+            x: panelX, y: panelY,
+            transparent: true, frame: false, hasShadow: false,
+            alwaysOnTop: true, skipTaskbar: true, resizable: false,
+            ...(process.platform === 'linux' ? { type: 'toolbar' } : {}),
+            webPreferences: { nodeIntegration: true, contextIsolation: false }
+        });
+        notesWin.setAlwaysOnTop(true, 'screen-saver');
+        notesWin.loadFile(path.join(__dirname, 'notes_panel.html'));
+        notesWin.once('ready-to-show', () => {
+            notesWin.show();
+            setTimeout(() => {
+                if (notesWin && !notesWin.isDestroyed()) {
+                    notesWin.webContents.send('notes-panel-data', data);
+                }
+            }, 150);
+        });
+        notesWin.on('closed', () => { notesWin = null; });
+    },
+
+    hideNotesPanel: () => {
+        if (notesWin && !notesWin.isDestroyed()) notesWin.close();
+    },
+
+    // ── Notes Action tool handler ─────────────────────────────────────────
+    notesActionTool: async (args) => {
+        const logFn = (msg) => {
+            if (mainWindow) mainWindow.webContents.send('automation-log', msg);
+            console.log('[Notes]', msg);
+        };
+        const notifyPanel = (data) => {
+            if (data.mode === 'close') {
+                Automation.hideNotesPanel();
+            } else {
+                Automation.showNotesPanel(data);
+            }
+        };
+        return await handleNotesActionTool(args, logFn, notifyPanel);
+    },
+
+    // ── Image Generation tool handler ─────────────────────────────────────
+    generateImageTool: async (args) => {
+        const logFn = (msg) => {
+            if (mainWindow) mainWindow.webContents.send('automation-log', msg);
+            console.log('[ImageGen]', msg);
+        };
+        return await handleImageGenerationTool(args, logFn);
+    },
 };
 
 ipcMain.handle('execute-automation', async (event, action) => {
@@ -1055,6 +1204,25 @@ ipcMain.on('live-audio-chunk', (event, base64Data) => {
 
 ipcMain.on('calendar-panel-hide', () => {
     Automation.hideCalendarPanel();
+});
+
+ipcMain.on('notes-panel-hide', () => {
+    Automation.hideNotesPanel();
+});
+
+ipcMain.on('contacts-panel-hide', () => {
+    Automation.hideContactsPanel();
+});
+
+ipcMain.on('notes-panel-open-note', (event, title) => {
+    const { getNote, openNoteInApp } = require('./notes');
+    const note = getNote(title);
+    if (note) {
+        openNoteInApp(note.filePath, note.title, note.content);
+        if (notesWin && !notesWin.isDestroyed()) {
+            notesWin.webContents.send('notes-panel-data', { mode: 'note', note });
+        }
+    }
 });
 
 ipcMain.on('live-text-chunk', (event, text) => {
@@ -1314,15 +1482,27 @@ async function executeAutomationInternal(command) {
         const appName = cmd.replace(/close |terminate |close-/g, '').trim();
         const platform = process.platform;
 
+        // Linux uses different process names than the user-facing app alias.
+        // closeAppMap[linux] overrides the pkill target on Linux only.
         const closeAppMap = {
-            'vscode': 'code',
-            'vs code': 'code',
-            'visual studio code': 'code',
-            'browser': platform === 'linux' ? 'zen' : platform === 'darwin' ? 'Safari' : 'msedge',
-            'chrome': platform === 'linux' ? 'google-chrome' : 'Google Chrome',
-            'firefox': platform === 'linux' ? 'firefox' : 'Firefox'
+            'vscode':               { all: 'code' },
+            'vs code':              { all: 'code' },
+            'visual studio code':   { all: 'code' },
+            'browser':              { linux: 'zen', darwin: 'Safari', win32: 'msedge' },
+            'chrome':               { linux: 'google-chrome', darwin: 'Google Chrome', win32: 'chrome' },
+            'firefox':              { linux: 'firefox', darwin: 'Firefox', win32: 'firefox' },
+            // Office apps — on Linux these are all soffice
+            'excel':                { linux: 'soffice', darwin: 'Microsoft Excel', win32: 'excel' },
+            'spreadsheet':          { linux: 'soffice', darwin: 'Microsoft Excel', win32: 'excel' },
+            'calc':                 { linux: 'soffice', darwin: 'LibreOffice', win32: 'soffice' },
+            'word':                 { linux: 'soffice', darwin: 'Microsoft Word', win32: 'winword' },
+            'writer':               { linux: 'soffice', darwin: 'LibreOffice', win32: 'soffice' },
+            'powerpoint':           { linux: 'soffice', darwin: 'Microsoft PowerPoint', win32: 'powerpnt' },
+            'impress':              { linux: 'soffice', darwin: 'LibreOffice', win32: 'soffice' },
+            'libreoffice':          { linux: 'soffice', darwin: 'LibreOffice', win32: 'soffice' },
         };
-        const target = closeAppMap[appName] || appName;
+        const entry = closeAppMap[appName.toLowerCase()];
+        const target = entry ? (entry.all || entry[platform] || entry.linux || appName) : appName;
 
         // SAFEGUARD: Don't kill Nova or VS Code if we're running inside it
         const selfTargets = ['node', 'electron', 'robot-widget', 'nova', 'assistant'];
