@@ -60,7 +60,7 @@ jobs:
         shell: pwsh
         run: Invoke-WebRequest -Uri "${{ secrets.VOSK_MODEL_URL }}" -OutFile "model.tar.gz"
 
-      - name: Build Windows installer
+      - name: Build Windows portable
         working-directory: robot-widget/frontend
         run: npm run build:win
         env:
@@ -71,7 +71,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: nova-windows
-          path: robot-widget/frontend/dist/Nova*Setup*.exe
+          path: robot-widget/frontend/dist/Nova*.exe
 
   # ── macOS ─────────────────────────────────────────────────────────────────────
   build-mac:

@@ -35,7 +35,7 @@
     "win": {
       "target": [
         {
-          "target": "nsis",
+          "target": "portable",
           "arch": [
             "x64"
           ]
@@ -44,16 +44,8 @@
       "icon": "assets/novaPreview1.png",
       "requestedExecutionLevel": "asInvoker",
       "sign": null,
-      "signingHashAlgorithms": null
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "installerIcon": "assets/novaPreview1.png",
-      "uninstallerIcon": "assets/novaPreview1.png",
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "Nova AI"
+      "signingHashAlgorithms": null,
+      "forceCodeSigning": false
     },
     "mac": {
       "target": [
