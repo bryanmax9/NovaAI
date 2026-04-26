@@ -30,17 +30,31 @@ const SYSTEM_INSTRUCTION =
 "Apple direct URLs: apple.com/shop/buy-iphone, apple.com/shop/buy-mac/macbook-pro, apple.com/shop/buy-ipad, apple.com/shop/buy-airpods. " +
 "Amazon: amazon.com/s?k=product+name. When receiving a STORE DETECTED notification, greet warmly and ask what they want to buy.\n\n" +
 
-"EMAIL MODE: To send an email, follow these steps in order: " +
-"(1) Call list_contacts to show the contacts panel. " +
-"(2) Ask who to email. " +
-"(3) Ask if they want an attachment - if yes, ask type (document/image/video) then call list_attachable_files, wait for user to pick a file. " +
-"(4) Ask for the subject. " +
-"(5) Ask what to say. " +
-"(6) Call send_email with recipient_name, message_intent, subject, and attachment_path if any. " +
-"(7) Read back the recipient and subject, ask 'Should I send it?' " +
-"(8) If confirmed, re-call send_email with confirmed=true and the same attachment_path. " +
-"After sending, ask if they want to send another or are done. " +
-"If done, call control_contacts_panel action='close_email_mode'. If sending another, call control_contacts_panel action='close_browser_keep_contacts'.\n\n" +
+"EMAIL MODE: A focused mode for sending emails. Stays active until the user says they are done.\n" +
+"MANDATORY SEQUENCE - follow EVERY step in ORDER, NEVER skip:\n" +
+"STEP 1 - Call list_contacts FIRST to show the contacts panel.\n" +
+"STEP 2 - Ask: 'Who would you like to email?' Wait for a name. Do NOT call send_email yet.\n" +
+"STEP 3 - ATTACHMENT: Ask: 'Would you like to include an attachment with this email?' Wait.\n" +
+"  If YES: ask 'Is it a video, document, or image?' then call list_attachable_files(file_type=...).\n" +
+"  The tool returns a numbered list. Read the list aloud, wait for the user's pick, confirm: 'Is [name] the right file?' Wait for yes/no.\n" +
+"  When confirmed, remember the exact attachment_path. Then go to STEP 4.\n" +
+"  If NO: go to STEP 4 without attachment_path.\n" +
+"STEP 4 - SUBJECT: Ask: 'What would you like the subject of this email to be?' Wait for their answer.\n" +
+"STEP 5 - CONTENT: Ask: 'What would you like to say in this email?' Wait for their answer.\n" +
+"STEP 6 - Call send_email(recipient_name, subject, message_intent, attachment_path if any).\n" +
+"STEP 7 - Read back the EMAIL PREVIEW: say the subject, summarize the body, mention attachment if any.\n" +
+"  Ask: 'Does this look good? Say yes to send, or tell me what to change.'\n" +
+"  User says YES: re-call send_email with confirmed=true and same args.\n" +
+"  Subject/content change: ask what to change, re-call send_email with updated args (no confirmed=true).\n" +
+"  User says NO/cancel: say 'Got it, email cancelled.' Do NOT call send_email.\n" +
+"AFTER SENDING:\n" +
+"STEP 8 - Say 'Email sent!' then ask: 'Would you like to send another email, or are you all done?'\n" +
+"STEP 9a - If ANOTHER: call control_contacts_panel action='close_browser_keep_contacts'. Then go to STEP 2.\n" +
+"STEP 9b - If DONE: call control_contacts_panel action='close_email_mode'. Say 'All done!'\n" +
+"SCROLLING CONTACTS: 'scroll up/down' -> control_contacts_panel scroll_up/scroll_down.\n" +
+"CANCEL: User says cancel/stop -> control_contacts_panel action='close_email_mode'.\n" +
+"DISAMBIGUATION: If multiple contacts found, speak numbered list and re-call with selected_index.\n" +
+"CRITICAL: NEVER call send_email until you have completed STEPs 2, 3, 4, and 5.\n\n" +
 
 "CALENDAR: Only call calendar_action for explicit calendar operations: checking schedule, creating events, cancelling events, checking availability. " +
 "Default time_expression for get_events is 'this week' unless the user specifies otherwise. " +

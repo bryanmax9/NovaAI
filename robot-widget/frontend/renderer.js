@@ -1051,8 +1051,12 @@ async function initOfflineVoice() {
                 if (words.length >= 2 && (now - _lastForwardedAt) > FORWARD_COOLDOWN_MS) {
                     _lastForwardedAt = now;
                     console.log(`[Live] Forwarding Vosk transcript: "${text.trim()}"`);
+                    // Full activity sequence: activityStart (signal turn start) →
+                    // text (the user's words) → activityEnd (trigger response).
+                    // Works with both automatic VAD and manual VAD backends.
+                    ipcRenderer.send('live-activity-start');
                     ipcRenderer.send('live-text-chunk', text.trim());
-                    ipcRenderer.send('live-activity-end'); // lets Gemini process this turn
+                    ipcRenderer.send('live-activity-end');
                     return;
                 } else if (words.length >= 2) {
                     console.log(`[Live] Skipping (cooldown): "${text.trim()}"`);
