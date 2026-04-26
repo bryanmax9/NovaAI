@@ -1,0 +1,22 @@
+{
+  "name": "nova-backend",
+  "version": "1.0.0",
+  "description": "Nova AI Backend API Server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "setup-google": "node scripts/setup_google_auth.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@google/genai": "^1.48.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.3.1",
+    "express": "^4.18.2",
+    "googleapis": "^144.0.0",
+    "ws": "^8.17.0"
+  }
+}

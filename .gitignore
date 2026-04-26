@@ -1,13 +1,12 @@
 node_modules/
-.DS_Store
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
 .env
-.idea/
-.vscode/
-
-# Ignore dynamically downloaded TTS binaries and data
-robot-widget/piper/
-robot-widget/assets/tts_output.wav
+credentials/
+*.log
+*.wav
+*.mp3
+robot-widget/frontend/vosk-model/
+robot-widget/frontend/vosk-model-es/
+robot-widget/frontend/assets/voice/
+robot-widget/frontend/assets/tts_output.wav
+robot-widget/frontend/assets/fallback_test.wav
+robot-widget/frontend/macros/
