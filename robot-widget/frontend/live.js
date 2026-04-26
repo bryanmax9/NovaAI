@@ -637,7 +637,24 @@ async function handleToolCall(call) {
         sendToolResult(call.id, { status: "Processing", message: `Looking up the contact and preparing the email. Say out loud: "Let me get that ready!" Then stay quiet while processing.` });
 
         const _runEmail = (extraNames) => {
-            backendPost('/api/email/send', _emailArgs).then((result) => {
+            // If an attachment path is provided, read it locally and send as base64.
+            // The Heroku backend cannot access the user's local filesystem.
+            const emailPayload = { ..._emailArgs };
+            if (emailPayload.attachment_path) {
+                try {
+                    if (fs.existsSync(emailPayload.attachment_path)) {
+                        emailPayload.attachment_data = fs.readFileSync(emailPayload.attachment_path).toString('base64');
+                        emailPayload.attachment_name = path.basename(emailPayload.attachment_path);
+                    } else {
+                        console.warn('[Email] Attachment not found:', emailPayload.attachment_path);
+                        emailPayload.attachment_path = null;
+                    }
+                } catch (e) {
+                    console.error('[Email] Failed to read attachment:', e.message);
+                    emailPayload.attachment_path = null;
+                }
+            }
+            backendPost('/api/email/send', emailPayload).then((result) => {
                 if (!_ws) return;
                 const speakText = result.speak || result.message || 'Email processed.';
                 let instr;

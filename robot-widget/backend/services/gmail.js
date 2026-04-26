@@ -361,8 +361,11 @@ function getMimeType(filename) {
     return map[ext] || 'application/octet-stream';
 }
 
-function buildRawMime({ to, subject, body, attachmentPath }) {
-    if (!attachmentPath) {
+function buildRawMime({ to, subject, body, attachmentPath, attachmentData, attachmentName }) {
+    // attachmentData (base64) + attachmentName takes priority over a local path.
+    // Local path is used only in dev; Heroku receives pre-encoded data from Electron.
+    const hasAttachment = attachmentData || attachmentPath;
+    if (!hasAttachment) {
         const headers = [
             `To: ${to}`,
             `Subject: =?UTF-8?B?${Buffer.from(subject).toString('base64')}?=`,
@@ -375,8 +378,8 @@ function buildRawMime({ to, subject, body, attachmentPath }) {
     }
 
     const boundary = `nova_${Date.now()}`;
-    const fileName = path.basename(attachmentPath);
-    const fileData = fs.readFileSync(attachmentPath).toString('base64');
+    const fileName = attachmentName || (attachmentPath ? path.basename(attachmentPath) : 'attachment');
+    const fileData = attachmentData || fs.readFileSync(attachmentPath).toString('base64');
     const fileMime = getMimeType(fileName);
 
     const multipart = [
@@ -412,12 +415,12 @@ function buildRawMime({ to, subject, body, attachmentPath }) {
  * @param {{ to: string, subject: string, body: string }}
  * @returns {{ success: boolean, messageId?: string, error?: string }}
  */
-async function sendEmail({ to, subject, body, attachmentPath }, authClient) {
+async function sendEmail({ to, subject, body, attachmentPath, attachmentData, attachmentName }, authClient) {
     try {
         const gmail    = await getGmailClient(authClient);
         const response = await gmail.users.messages.send({
             userId: 'me',
-            requestBody: { raw: buildRawMime({ to, subject, body, attachmentPath }) },
+            requestBody: { raw: buildRawMime({ to, subject, body, attachmentPath, attachmentData, attachmentName }) },
         });
         console.log('[Gmail] Email sent — messageId:', response.data.id);
         return { success: true, messageId: response.data.id };
@@ -432,12 +435,12 @@ async function sendEmail({ to, subject, body, attachmentPath }, authClient) {
  * @param {{ to: string, subject: string, body: string }}
  * @returns {{ success: boolean, draftId?: string, error?: string }}
  */
-async function draftEmail({ to, subject, body, attachmentPath }, authClient) {
+async function draftEmail({ to, subject, body, attachmentPath, attachmentData, attachmentName }, authClient) {
     try {
         const gmail    = await getGmailClient(authClient);
         const response = await gmail.users.drafts.create({
             userId: 'me',
-            requestBody: { message: { raw: buildRawMime({ to, subject, body, attachmentPath }) } },
+            requestBody: { message: { raw: buildRawMime({ to, subject, body, attachmentPath, attachmentData, attachmentName }) } },
         });
         console.log('[Gmail] Draft saved — draftId:', response.data.id);
         return { success: true, draftId: response.data.id };
@@ -480,12 +483,14 @@ async function handleSendEmailTool(
         recipient_name,
         subject,
         message_intent,
-        draft_only      = false,
-        recipient_email = null,
-        confirmed       = false,
-        selected_index  = null,
-        attachment_path = null,
-        confirmed_body  = null,
+        draft_only       = false,
+        recipient_email  = null,
+        confirmed        = false,
+        selected_index   = null,
+        attachment_path  = null,
+        attachment_data  = null,
+        attachment_name  = null,
+        confirmed_body   = null,
     },
     authClient,
     logFn
@@ -672,16 +677,18 @@ async function handleSendEmailTool(
             if (!finalSubject) finalSubject = generatedSubject;
         }
 
-        if (attachment_path && !fs.existsSync(attachment_path)) {
+        // attachment_data (base64 from Electron) is preferred over local path (unavailable on Heroku)
+        if (!attachment_data && attachment_path && !fs.existsSync(attachment_path)) {
             const errMsg = `I couldn't find the attachment file: ${path.basename(attachment_path)}`;
             log(`❌ ${errMsg}`);
             return { status: 'error', speak: errMsg, message: errMsg };
         }
         const body = finalBody;
-        log(`📧 ${draft_only ? 'Drafting' : 'Sending'} to ${resolvedEmail} — "${finalSubject}"${attachment_path ? ` + ${path.basename(attachment_path)}` : ''}`);
+        const attachLabel = attachment_name || (attachment_path ? path.basename(attachment_path) : null);
+        log(`📧 ${draft_only ? 'Drafting' : 'Sending'} to ${resolvedEmail} — "${finalSubject}"${attachLabel ? ` + ${attachLabel}` : ''}`);
         const result = draft_only
-            ? await draftEmail({ to: resolvedEmail, subject: finalSubject, body, attachmentPath: attachment_path }, authClient)
-            : await sendEmail({ to: resolvedEmail, subject: finalSubject, body, attachmentPath: attachment_path }, authClient);
+            ? await draftEmail({ to: resolvedEmail, subject: finalSubject, body, attachmentPath: attachment_path, attachmentData: attachment_data, attachmentName: attachment_name }, authClient)
+            : await sendEmail({ to: resolvedEmail, subject: finalSubject, body, attachmentPath: attachment_path, attachmentData: attachment_data, attachmentName: attachment_name }, authClient);
 
         if (!result.success) {
             const errMsg =
