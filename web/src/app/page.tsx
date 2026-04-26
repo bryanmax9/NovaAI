@@ -824,7 +824,7 @@ export default function Home() {
                   ? <span style={{ color: W45 }}>Checking availability…</span>
                   : dlRemaining === 0
                     ? <span style={{ color: W45 }}>Early access is full — join the waitlist below</span>
-                    : <span style={{ color: "#86efac" }}><strong style={{ color: "#4ade80" }}>{dlRemaining}</strong>&nbsp;of 5 early access slots remaining</span>
+                    : <span style={{ color: "#86efac" }}><strong style={{ color: "#4ade80" }}>{dlRemaining}</strong>&nbsp;of 8 early access slots remaining</span>
                 }
               </div>
             </div>
@@ -867,8 +867,12 @@ export default function Home() {
                   sub: "Ubuntu · Arch · Fedora · Any distro",
                   badge: ".AppImage · no install",
                   icon: (
-                    <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M12.504 0c-.155 0-.315.008-.48.021-4.226.333-3.105 4.807-3.17 6.298-.076 1.092-.3 1.953-1.05 3.02-.885 1.051-2.127 2.75-2.716 4.521-.278.832-.41 1.684-.287 2.489a.424.424 0 00-.11.135c-.26.268-.45.6-.663.839-.199.199-.485.267-.797.4-.313.136-.658.269-.864.68-.09.189-.136.394-.132.602 0 .199.027.4.055.536.058.399.116.728.04.97-.249.68-.28 1.145-.106 1.484.174.334.535.47.94.601.81.2 1.91.135 2.774.6.926.466 1.866.67 2.616.47.526-.132.97-.514 1.27-1.069.Xf.217.49.404.793.601.2.14.394.271.548.433.154.162.107.406-.001.553-.249.282.18.577.374.819.063.076.127.136.198.181.098.059.196.069.294.069.098 0 .196-.01.294-.069a.4.4 0 00.198-.181c.194-.242.623-.537.374-.819-.108-.147-.155-.391-.001-.553.154-.162.348-.293.548-.433.303-.197.576-.384.793-.601.3.555.744.937 1.27 1.069.75.2 1.69-.004 2.616-.47.864-.465 1.964-.4 2.774-.6.405-.131.766-.267.94-.601.174-.339.143-.804-.106-1.484-.076-.242-.018-.571.04-.97.028-.136.055-.337.055-.536a1.27 1.27 0 00-.132-.602c-.206-.411-.551-.544-.864-.68-.312-.133-.598-.201-.797-.4-.213-.239-.403-.571-.663-.839a.424.424 0 00-.11-.135c.123-.805-.009-1.657-.287-2.489-.589-1.771-1.831-3.47-2.716-4.521-.75-1.067-.974-1.928-1.05-3.02-.065-1.491 1.056-5.965-3.17-6.298-.165-.013-.325-.021-.48-.021z"/>
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="2" y="3" width="20" height="14" rx="2"/>
+                      <polyline points="8 21 12 17 16 21"/>
+                      <line x1="12" y1="17" x2="12" y2="21"/>
+                      <polyline points="6 8 9 11 6 14"/>
+                      <line x1="12" y1="14" x2="16" y2="14"/>
                     </svg>
                   ),
                   iconColor: "#fbbf24",
@@ -936,13 +940,21 @@ export default function Home() {
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
                 </svg>
-                <span className="font-inter font-semibold" style={{ fontSize: 13, color: "#fbbf24" }}>Linux — make it executable first</span>
+                <span className="font-inter font-semibold" style={{ fontSize: 13, color: "#fbbf24" }}>Linux — run the AppImage</span>
               </div>
               <pre className="font-mono overflow-x-auto" style={{ fontSize: 13, color: W55, lineHeight: 2 }}>
-{`chmod +x Nova*.AppImage
-./Nova*.AppImage`}
+{`chmod +x Nova-1.0.0.AppImage
+./Nova-1.0.0.AppImage`}
               </pre>
-              <p className="font-inter mt-2" style={{ fontSize: 12, color: W30 }}>
+              <div className="mt-4 pt-4" style={{ borderTop: "1px solid rgba(251,191,36,0.1)" }}>
+                <p className="font-inter font-semibold mb-2" style={{ fontSize: 12, color: "#fbbf24" }}>Or run from source:</p>
+                <pre className="font-mono overflow-x-auto" style={{ fontSize: 12, color: W45, lineHeight: 2 }}>
+{`git clone git@github.com:bryanmax9/NovaAI.git
+cd NovaAI/robot-widget/frontend
+npm install && npm start`}
+                </pre>
+              </div>
+              <p className="font-inter mt-3" style={{ fontSize: 12, color: W30 }}>
                 Requires microphone access + internet. Say <em style={{ color: W45 }}>&quot;Hey Nova&quot;</em> to wake the assistant.
               </p>
             </div>
