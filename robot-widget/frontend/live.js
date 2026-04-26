@@ -84,6 +84,8 @@ const CALENDAR_DEBOUNCE_MS = 12000;
 let _emailInFlight = false;
 let _emailLastCompletedAt = 0;
 let _emailModeActive = false;
+let _pendingAttachData = null;   // base64 cached across the needs_confirmation → confirmed flow
+let _pendingAttachName = null;
 let _listContactsLastAt = 0;
 const LIST_CONTACTS_COOLDOWN_MS = 30000;
 let _listAttachLastAt = 0;
@@ -607,6 +609,7 @@ async function handleToolCall(call) {
             _emailModeActive = false;
             _emailInFlight = false;
             _listAttachLastAt = 0;
+            _pendingAttachData = null; _pendingAttachName = null;
             _emailLastCompletedAt = Date.now();
             if (automationRef && automationRef.closeBrowser) automationRef.closeBrowser();
             if (automationRef && automationRef.hideContactsPanel) automationRef.hideContactsPanel();
@@ -637,22 +640,26 @@ async function handleToolCall(call) {
         sendToolResult(call.id, { status: "Processing", message: `Looking up the contact and preparing the email. Say out loud: "Let me get that ready!" Then stay quiet while processing.` });
 
         const _runEmail = (extraNames) => {
-            // If an attachment path is provided, read it locally and send as base64.
-            // The Heroku backend cannot access the user's local filesystem.
             const emailPayload = { ..._emailArgs };
-            if (emailPayload.attachment_path) {
+            // Read attachment locally if a path is provided and not yet cached.
+            // Cache persists across the needs_confirmation → confirmed two-step flow.
+            if (emailPayload.attachment_path && !_pendingAttachData) {
                 try {
                     if (fs.existsSync(emailPayload.attachment_path)) {
-                        emailPayload.attachment_data = fs.readFileSync(emailPayload.attachment_path).toString('base64');
-                        emailPayload.attachment_name = path.basename(emailPayload.attachment_path);
+                        _pendingAttachData = fs.readFileSync(emailPayload.attachment_path).toString('base64');
+                        _pendingAttachName = path.basename(emailPayload.attachment_path);
+                        console.log(`[Email] Attachment cached: ${_pendingAttachName}`);
                     } else {
                         console.warn('[Email] Attachment not found:', emailPayload.attachment_path);
-                        emailPayload.attachment_path = null;
                     }
                 } catch (e) {
                     console.error('[Email] Failed to read attachment:', e.message);
-                    emailPayload.attachment_path = null;
                 }
+            }
+            // Always attach cached data if available (survives confirmation round-trip)
+            if (_pendingAttachData) {
+                emailPayload.attachment_data = _pendingAttachData;
+                emailPayload.attachment_name = _pendingAttachName;
             }
             backendPost('/api/email/send', emailPayload).then((result) => {
                 if (!_ws) return;
@@ -661,6 +668,7 @@ async function handleToolCall(call) {
                 switch (result.status) {
                     case 'success':
                         _emailModeActive = true;
+                        _pendingAttachData = null; _pendingAttachName = null; // clear after send
                         if (automationRef && automationRef.openBrowser) automationRef.openBrowser('https://mail.google.com/mail/u/0/#sent');
                         instr = `[EMAIL SENT - EMAIL MODE ACTIVE] ${speakText} Say: "Email sent! I've opened your sent folder to confirm." Then ask: "Would you like to send another email, or are you all done?" Wait for their answer. If they want to send ANOTHER: call control_contacts_panel with action="close_browser_keep_contacts", then ask who they want to email next. If they are DONE: call control_contacts_panel with action="close_email_mode". Do NOT call send_email yet — wait for their response first.`;
                         break;
