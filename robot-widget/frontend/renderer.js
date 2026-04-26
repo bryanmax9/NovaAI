@@ -71,8 +71,6 @@ let _novaPoweredUp = false;
 ipcRenderer.on('live-session-event', (event, status) => {
     if (status.event === 'connected') {
         window.novaState.isLiveActive = true;
-        // Silent system init — activates the session turn without triggering audio.
-        ipcRenderer.send('live-text-chunk', '[SYSTEM INIT] Session connected. Stay silent and ready. Do not speak. Wait for the user to address you.');
         if (!_novaPoweredUp) {
             _novaPoweredUp = true;
             if (novaWidget) novaWidget.classList.remove('offline');
