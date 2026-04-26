@@ -1282,6 +1282,12 @@ setTimeout(() => {
     initOfflineVoice();
 }, 2000);
 
+// Auto-connect to the backend on startup so the widget can power up.
+// Nova stays dark until SESSION_READY fires; user doesn't need to say anything first.
+setTimeout(() => {
+    ipcRenderer.send('live-start');
+}, 3000);
+
 // ── Welcome on first backend connection ────────────────────────────────────
 // Nova stays dark (offline class) until the first Live session is ready.
 // When SESSION_READY fires, we power up the widget and play the original welcome.
