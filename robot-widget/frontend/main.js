@@ -3630,7 +3630,8 @@ async function handleCodeAgentTool(args, logFn) {
 
 // ── Macro Storage Helpers ──────────────────────────────────────────────────
 
-const MACROS_FILE = path.join(__dirname, 'macros', 'macros.json');
+const MACROS_DIR  = app.isPackaged ? path.join(app.getPath('userData'), 'macros') : path.join(__dirname, 'macros');
+const MACROS_FILE = path.join(MACROS_DIR, 'macros.json');
 
 function loadMacros() {
     try {
@@ -3770,11 +3771,10 @@ app.whenReady().then(() => {
     // Load the user's Google token from local storage into the backend client
     loadLocalToken();
 
-    // Ensure macros/ directory exists
-    const macrosDir = path.join(__dirname, 'macros');
-    if (!fs.existsSync(macrosDir)) {
-        fs.mkdirSync(macrosDir, { recursive: true });
-        console.log('[Macro] Created macros/ directory');
+    // Ensure macros/ directory exists (userData when packaged, __dirname in dev)
+    if (!fs.existsSync(MACROS_DIR)) {
+        fs.mkdirSync(MACROS_DIR, { recursive: true });
+        console.log('[Macro] Created macros/ directory at', MACROS_DIR);
     }
 
     const { session } = require('electron');
