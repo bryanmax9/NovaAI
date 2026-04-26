@@ -873,7 +873,10 @@ export default function Home() {
               </div>
               <pre className="font-mono overflow-x-auto" style={{ fontSize: 13, color: W55, lineHeight: 2 }}>
 {`chmod +x Nova-1.0.0.AppImage
-./Nova-1.0.0.AppImage`}
+./Nova-1.0.0.AppImage
+
+# Arch Linux / missing FUSE 2? Run this first:
+sudo pacman -S fuse2`}
               </pre>
               <div className="mt-4 pt-4" style={{ borderTop: "1px solid rgba(251,191,36,0.1)" }}>
                 <p className="font-inter font-semibold mb-2" style={{ fontSize: 12, color: "#fbbf24" }}>Or run from source:</p>
