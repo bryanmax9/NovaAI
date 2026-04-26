@@ -1282,38 +1282,20 @@ setTimeout(() => {
     initOfflineVoice();
 }, 2000);
 
-// ── Boot hint — plays while Nova is still dark, tells user how to activate ─
-setTimeout(async () => {
-    try {
-        const audioPath = await ipcRenderer.invoke('generate-speech',
-            "Say Hey Nova to connect.");
-        if (!audioPath) {
-            if ('speechSynthesis' in window) {
-                const utt = new SpeechSynthesisUtterance("Say Hey Nova to connect.");
-                utt.rate = 0.9;
-                window.speechSynthesis.speak(utt);
-            }
-            return;
-        }
-        const audio = new Audio();
-        audio.addEventListener('loadeddata', () => {
-            audio.play().catch(() => {});
-        });
-        audio.src = `appassets:///${audioPath}`;
-        audio.load();
-    } catch (_) {}
-}, 1200);
-
 // ── Welcome on first backend connection ────────────────────────────────────
 // Nova stays dark (offline class) until the first Live session is ready.
-// When SESSION_READY fires, we power up the widget and play the welcome.
+// When SESSION_READY fires, we power up the widget and play the original welcome.
 async function _playWelcome() {
     try {
         const audioPath = await ipcRenderer.invoke('generate-speech',
-            "Nova online. I am your personal AI assistant. Ready to help.");
+            "Nova online. I am your personal AI assistant. " +
+            "Say Hey Nova at any time to start a conversation with me in any language.");
         if (!audioPath) {
             if ('speechSynthesis' in window) {
-                const utt = new SpeechSynthesisUtterance("Nova online. Ready to help.");
+                const utt = new SpeechSynthesisUtterance(
+                    "Nova online. I am your personal AI assistant. " +
+                    "Say Hey Nova at any time to start a conversation with me."
+                );
                 utt.rate = 0.9;
                 window.speechSynthesis.speak(utt);
             }
