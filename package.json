@@ -1,0 +1,11 @@
+{
+  "name": "nova-ai-root",
+  "version": "1.0.0",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "heroku-postbuild": "cd robot-widget/backend && npm install",
+    "start": "cd robot-widget/backend && node server.js"
+  }
+}
