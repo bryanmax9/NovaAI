@@ -1,11 +1,5 @@
 name: Build & Release Nova
 
-# Push a version tag to trigger builds for all three platforms.
-# Example: git tag v1.0.0 && git push origin v1.0.0
-#
-# Required GitHub Secret:
-#   VOSK_MODEL_URL — URL to your model.tar.gz (e.g. a GitHub Release asset
-#                    or any direct download link to the 40MB vosk model file)
 on:
   push:
     tags:
@@ -27,12 +21,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: robot-widget/frontend/package-lock.json
 
       - name: Install dependencies
         working-directory: robot-widget/frontend
-        run: npm ci
+        run: npm install
 
       - name: Download Vosk model
         working-directory: robot-widget/frontend
@@ -58,12 +50,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: robot-widget/frontend/package-lock.json
 
       - name: Install dependencies
         working-directory: robot-widget/frontend
-        run: npm ci
+        run: npm install
 
       - name: Download Vosk model
         working-directory: robot-widget/frontend
@@ -75,6 +65,8 @@ jobs:
         run: npm run build:win
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WIN_CSC_LINK: ''
+          CSC_IDENTITY_AUTO_DISCOVERY: false
 
       - uses: actions/upload-artifact@v4
         with:
@@ -90,12 +82,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: robot-widget/frontend/package-lock.json
 
       - name: Install dependencies
         working-directory: robot-widget/frontend
-        run: npm ci
+        run: npm install
 
       - name: Download Vosk model
         working-directory: robot-widget/frontend
@@ -106,46 +96,28 @@ jobs:
         run: npm run build:mac
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
 
       - uses: actions/upload-artifact@v4
         with:
           name: nova-mac
           path: robot-widget/frontend/dist/Nova*.dmg
 
-  # ── Create GitHub Release ─────────────────────────────────────────────────────
+  # ── Upload to existing GitHub Release ─────────────────────────────────────────
   release:
     needs: [build-linux, build-windows, build-mac]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
           path: dist/
 
-      - name: Create Release
+      - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Nova ${{ github.ref_name }} — Early Access
-          prerelease: true
-          body: |
-            ## Nova AI ${{ github.ref_name }}
-
-            Voice-powered AI desktop assistant.
-
-            | Platform | Download |
-            |----------|---------|
-            | Windows  | `Nova-Setup.exe` |
-            | macOS    | `Nova.dmg` |
-            | Linux    | `Nova.AppImage` |
-
-            **Linux quick start:**
-            ```bash
-            chmod +x Nova*.AppImage
-            ./Nova*.AppImage
-            ```
+          tag_name: v1.0.0
           files: |
             dist/nova-linux/Nova*.AppImage
             dist/nova-windows/Nova*Setup*.exe
