@@ -157,13 +157,12 @@ function attachLiveProxy(ws) {
                 break;
             }
 
-            // Text chunks use sendClientContent (ordered turns), not sendRealtimeInput.
+            // sendRealtimeInput({text}) is the only form this model responds to.
+            // sendClientContent is silently ignored by gemini-3.1-flash-live-preview.
             case 'TEXT_CHUNK':
                 if (activeSession && msg.text) {
                     try {
-                        activeSession.sendClientContent({
-                            turns: [{ role: 'user', parts: [{ text: msg.text }] }],
-                        });
+                        activeSession.sendRealtimeInput({ text: msg.text });
                     } catch (e) {
                         console.error('[LiveProxy] sendText error:', e.message);
                     }
@@ -184,13 +183,10 @@ function attachLiveProxy(ws) {
                 }
                 break;
 
-            // Text injections (system messages, guardrail feedback) use sendClientContent.
             case 'INJECT_TEXT':
                 if (activeSession && msg.text) {
                     try {
-                        activeSession.sendClientContent({
-                            turns: [{ role: 'user', parts: [{ text: msg.text }] }],
-                        });
+                        activeSession.sendRealtimeInput({ text: msg.text });
                     } catch (e) {
                         console.error('[LiveProxy] injectText error:', e.message);
                     }
