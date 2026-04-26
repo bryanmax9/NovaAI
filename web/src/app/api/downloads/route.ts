@@ -16,7 +16,7 @@ type Platform = keyof typeof URLS;
 
 async function getUsed(store: ReturnType<typeof getStore>): Promise<number> {
   try {
-    const raw = await store.get('count');
+    const raw = await store.get('count', { type: 'text' });
     if (!raw) return 0;
     const parsed = JSON.parse(raw);
     return typeof parsed?.count === 'number' ? parsed.count : 0;
