@@ -71,6 +71,9 @@ let _novaPoweredUp = false;
 ipcRenderer.on('live-session-event', (event, status) => {
     if (status.event === 'connected') {
         window.novaState.isLiveActive = true;
+        // Prime Gemini immediately so it doesn't idle-close before the user speaks.
+        // This text triggers a response turn and keeps the session alive.
+        ipcRenderer.send('live-text-chunk', 'Hello! You are Nova, ready and connected. Greet the user warmly in one sentence.');
         if (!_novaPoweredUp) {
             _novaPoweredUp = true;
             if (novaWidget) novaWidget.classList.remove('offline');
@@ -80,17 +83,13 @@ ipcRenderer.on('live-session-event', (event, status) => {
     }
     if (status.event === 'closed') {
         window.novaState.isLiveActive = false;
-        console.log('[Live] Session closed');
-        if (window.novaState.isAwake && !window.novaState.isResearching) {
-            setTimeout(() => {
-                if (window.novaState.isAwake && !window.novaState.isLiveActive) {
-                    ipcRenderer.send('live-start');
-                }
-            }, 2000);
-        }
-    }
-    if (status.event === 'interrupted') {
-        // audio queue reset happens in the audio handler below
+        console.log('[Live] Session closed — reconnecting in 3s...');
+        // Always reconnect — idle Gemini timeout is expected, not an error.
+        setTimeout(() => {
+            if (!window.novaState.isLiveActive) {
+                ipcRenderer.send('live-start');
+            }
+        }, 3000);
     }
     if (status.event === 'closed' && status.code === 1007) {
         const utterance = new window.SpeechSynthesisUtterance("Your API key is invalid or missing. Please insert a real API key into the dot env file.");
@@ -1043,10 +1042,9 @@ async function initOfflineVoice() {
                 }
             }
 
-            // When Gemini Live is active, forward Vosk transcription as text.
-            // Gemini's audio VAD is unreliable on this model; sendRealtimeInput({text})
-            // is proven to work and consistently triggers audio responses.
-            if (window.novaState.isLiveActive && !window.novaState.isSpeaking) {
+            // Forward Vosk transcription to Gemini only when the user is actively awake.
+            // isAwake=false means ambient/background audio — never send that to Gemini.
+            if (window.novaState.isLiveActive && window.novaState.isAwake && !window.novaState.isSpeaking) {
                 const words = text.trim().split(/\s+/);
                 if (words.length >= 2) {
                     console.log(`[Live] Forwarding Vosk transcript: "${text.trim()}"`);
@@ -1327,9 +1325,6 @@ async function _playWelcome() {
             audio.play().catch(err => console.error('[Nova Welcome] play() failed:', err));
         });
         audio.addEventListener('ended', () => {
-            // After welcome plays, send a silent text prompt to prime Gemini's VAD.
-            // Without this, Gemini may ignore the first few seconds of voice audio.
-            ipcRenderer.send('live-text-chunk', '[SYSTEM] Nova is now online and ready. Greet the user warmly and wait for them to speak.');
             ipcRenderer.invoke('google-auth-status').then(res => {
                 if (!res.authenticated) ipcRenderer.send('google-auth-open-panel');
             }).catch(() => {});
