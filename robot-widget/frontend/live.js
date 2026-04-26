@@ -5,6 +5,7 @@ const path = require('path');
 const os   = require('os');
 const https = require('https');
 const { BACKEND_URL, BACKEND_WS_URL } = require('./config.js');
+const backendClient = require('./backend_client.js');
 
 // ── Video folder helpers ────────────────────────────────────────────────────
 const VIDEO_EXTS = ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.wmv', '.flv', '.m4v'];
@@ -147,25 +148,11 @@ function onDomMapAvailable(data) {
 
 // ── Backend helpers ─────────────────────────────────────────────────────────
 async function backendPost(path, body) {
-    const res = await fetch(`${BACKEND_URL}${path}`, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify(body),
-    });
-    if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`Backend ${path} error ${res.status}: ${errText}`);
-    }
-    return res.json();
+    return backendClient.post(path, body);
 }
 
 async function backendGet(path) {
-    const res = await fetch(`${BACKEND_URL}${path}`);
-    if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`Backend GET ${path} error ${res.status}: ${errText}`);
-    }
-    return res.json();
+    return backendClient.get(path);
 }
 
 // ── WS send helper ──────────────────────────────────────────────────────────

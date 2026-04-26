@@ -1119,9 +1119,15 @@ async function initOfflineVoice() {
             playLiveQueue();
         });
 
+        let _novaPoweredUp = false;
         ipcRenderer.on('live-session-event', (event, status) => {
-            if (status.event === 'opened') {
+            if (status.event === 'connected') {
                 window.novaState.isLiveActive = true;
+                if (!_novaPoweredUp) {
+                    _novaPoweredUp = true;
+                    if (novaWidget) novaWidget.classList.remove('offline');
+                    _playWelcome();
+                }
                 uiLog("🔴 [LIVE] Bi-directional mode active");
             }
             if (status.event === 'closed') {
@@ -1276,59 +1282,36 @@ setTimeout(() => {
     initOfflineVoice();
 }, 2000);
 
-// ── Startup introduction ───────────────────────────────────────────────────
-// Plays a one-way announcement via Piper TTS WITHOUT touching novaState so
-// Vosk keeps running and "Hey Nova" is detectable during/after the intro.
-setTimeout(async () => {
+// ── Welcome on first backend connection ────────────────────────────────────
+// Nova stays dark (offline class) until the first Live session is ready.
+// When SESSION_READY fires, we power up the widget and play the welcome.
+async function _playWelcome() {
     try {
-        console.log('[Nova Startup] Generating intro audio...');
         const audioPath = await ipcRenderer.invoke('generate-speech',
-            "Nova online. I am your personal AI assistant. " +
-            "Say Hey Nova at any time to start a conversation with me in any language.");
+            "Nova online. I am your personal AI assistant. Ready to help.");
         if (!audioPath) {
-            console.warn('[Nova Startup] TTS unavailable — using Web Speech fallback.');
-            if (novaWidget) novaWidget.classList.remove('offline');
             if ('speechSynthesis' in window) {
-                const utt = new SpeechSynthesisUtterance(
-                    "Nova online. I am your personal AI assistant. " +
-                    "Say Hey Nova at any time to start a conversation with me."
-                );
+                const utt = new SpeechSynthesisUtterance("Nova online. Ready to help.");
                 utt.rate = 0.9;
-                utt.onend = () => {
-                    ipcRenderer.invoke('google-auth-status').then(res => {
-                        if (!res.authenticated) ipcRenderer.send('google-auth-open-panel');
-                    }).catch(() => {});
-                };
                 window.speechSynthesis.speak(utt);
             }
             return;
         }
         const audio = new Audio();
         audio.addEventListener('loadeddata', () => {
-            audio.play()
-                .then(() => {
-                    console.log('[Nova Startup] Intro playing.');
-                    if (novaWidget) novaWidget.classList.remove('offline');
-                })
-                .catch(err => console.error('[Nova Startup] play() failed:', err));
+            audio.play().catch(err => console.error('[Nova Welcome] play() failed:', err));
         });
-        audio.addEventListener('ended',  () => {
-            console.log('[Nova Startup] Intro finished.');
-            // Check Google auth status and open setup panel if needed
+        audio.addEventListener('ended', () => {
             ipcRenderer.invoke('google-auth-status').then(res => {
                 if (!res.authenticated) ipcRenderer.send('google-auth-open-panel');
             }).catch(() => {});
         });
-        audio.addEventListener('error',  (e) => {
-            console.error('[Nova Startup] Audio error:', e.target?.error?.code);
-            if (novaWidget) novaWidget.classList.remove('offline');
-        });
         audio.src = `appassets:///${audioPath}`;
         audio.load();
     } catch (err) {
-        console.error('[Nova Startup] TTS error:', err);
+        console.error('[Nova Welcome] TTS error:', err);
     }
-}, 1200);
+}
 
 // Helper to detect music intent
 function isMusicIntent(query) {
