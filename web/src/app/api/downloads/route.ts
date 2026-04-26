@@ -5,8 +5,8 @@ const MAX_DOWNLOADS = 8;
 const BASE = 'https://github.com/bryanmax9/NovaAI/releases/download/v1.0.0';
 
 const URLS = {
-  windows: `${BASE}/Nova-Setup.exe`,
-  mac:     `${BASE}/Nova.dmg`,
+  windows: `${BASE}/Nova.Setup.1.0.0.exe`,
+  mac:     `${BASE}/Nova-1.0.0.dmg`,
   linux:   `${BASE}/Nova-1.0.0.AppImage`,
 } as const;
 
