@@ -64,6 +64,41 @@ window.addEventListener('dblclick', () => {
 // ── Widget State Management ────────────────────────────────────────────────
 const novaWidget = document.getElementById('widget');
 
+// ── Live session events — registered at top level to avoid race conditions ─
+// SESSION_READY fires before initOfflineVoice() finishes loading Vosk,
+// so these listeners must be set up immediately on page load.
+let _novaPoweredUp = false;
+ipcRenderer.on('live-session-event', (event, status) => {
+    if (status.event === 'connected') {
+        window.novaState.isLiveActive = true;
+        if (!_novaPoweredUp) {
+            _novaPoweredUp = true;
+            if (novaWidget) novaWidget.classList.remove('offline');
+            _playWelcome();
+        }
+        console.log('[Live] Bi-directional mode active');
+    }
+    if (status.event === 'closed') {
+        window.novaState.isLiveActive = false;
+        console.log('[Live] Session closed');
+        if (window.novaState.isAwake && !window.novaState.isResearching) {
+            setTimeout(() => {
+                if (window.novaState.isAwake && !window.novaState.isLiveActive) {
+                    ipcRenderer.send('live-start');
+                }
+            }, 2000);
+        }
+    }
+    if (status.event === 'interrupted') {
+        // audio queue reset happens in the audio handler below
+    }
+    if (status.event === 'closed' && status.code === 1007) {
+        const utterance = new window.SpeechSynthesisUtterance("Your API key is invalid or missing. Please insert a real API key into the dot env file.");
+        window.speechSynthesis.speak(utterance);
+        window.novaState.isAwake = false;
+    }
+});
+
 function setOrbState(state) {
     if (!novaWidget) return;
     novaWidget.classList.remove('listening', 'speaking', 'thinking');
@@ -1119,49 +1154,19 @@ async function initOfflineVoice() {
             playLiveQueue();
         });
 
-        let _novaPoweredUp = false;
-        ipcRenderer.on('live-session-event', (event, status) => {
-            if (status.event === 'connected') {
-                window.novaState.isLiveActive = true;
-                if (!_novaPoweredUp) {
-                    _novaPoweredUp = true;
-                    if (novaWidget) novaWidget.classList.remove('offline');
-                    _playWelcome();
-                }
-                uiLog("🔴 [LIVE] Bi-directional mode active");
+        // live-session-event is handled at top level to avoid race with Vosk loading.
+        ipcRenderer.on('live-session-event-audio', (event, status) => {
+            // Audio-specific side effects on session events.
+            if (status.event === 'closed' || status.event === 'interrupted') {
+                audioQueue = [];
+                resetLivePlayback();
             }
             if (status.event === 'closed') {
-                window.novaState.isLiveActive = false;
-                audioQueue = [];
-                resetLivePlayback();      // Clear any audio state from the dropped session
                 uiLog("⚪ [LIVE] Bi-directional mode ended");
-                // Auto-reconnect if the user is still awake — the session dropped unexpectedly
-                if (window.novaState.isAwake && !window.novaState.isResearching) {
-                    uiLog("🔄 Session dropped — reconnecting in 2s...");
-                    setTimeout(() => {
-                        if (window.novaState.isAwake && !window.novaState.isLiveActive) {
-                            ipcRenderer.send('live-start');
-                            // Re-inject paper context after the new session connects
-                            injectPaperContextIfNeeded(4000);
-                        }
-                    }, 2000);
-                }
+                if (window.novaState.isAwake) injectPaperContextIfNeeded(4000);
             }
-            if (status.event === 'interrupted') {
-                audioQueue = [];          // Clear queue on interrupt
-                resetLivePlayback();      // Also clear the stuck-speaking state
-            }
-            if (status.event === 'closed' && status.code === 1007) {
-                console.log("❌ API Key Error: Google dropped the connection");
-                const utterance = new window.SpeechSynthesisUtterance("Your API key is invalid or missing. Please insert a real API key into the dot env file.");
-                window.speechSynthesis.speak(utterance);
-                subtitleElement.innerText = "Error: Invalid API Key. Please edit .env file.";
-                subtitleElement.style.color = '#ff4444';
-
-                // Force sleep
-                window.novaState.isAwake = false;
-                window.novaState.isInConversation = false;
-                clearTimeout(sleepTimer);
+            if (status.event === 'connected') {
+                uiLog("🔴 [LIVE] Bi-directional mode active");
             }
         });
 

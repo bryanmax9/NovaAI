@@ -1202,6 +1202,7 @@ function startLiveSession(mainWindow, automation) {
                 console.log('[Live] Session ready');
                 if (mainWindow && !mainWindow.isDestroyed()) {
                     mainWindow.webContents.send('live-session-event', { event: 'connected' });
+                    mainWindow.webContents.send('live-session-event-audio', { event: 'connected' });
                 }
                 break;
 
@@ -1233,6 +1234,7 @@ function startLiveSession(mainWindow, automation) {
                 _videoGenInFlight = false;
                 if (mainWindow && !mainWindow.isDestroyed()) {
                     mainWindow.webContents.send('live-session-event', { event: 'closed' });
+                    mainWindow.webContents.send('live-session-event-audio', { event: 'closed' });
                 }
                 break;
 
