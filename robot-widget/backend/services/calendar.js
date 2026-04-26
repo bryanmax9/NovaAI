@@ -2,13 +2,13 @@
 require('dotenv').config();
 const { google }                    = require('googleapis');
 const { GoogleGenAI }               = require('@google/genai');
-const { getAuthClient, isAuthenticated } = require('./google_auth.js');
+const { getAuthClient } = require('./google_auth.js');
 const { searchContacts }            = require('./gmail.js');
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-async function getCalendarClient() {
-    const auth = await getAuthClient();
+async function getCalendarClient(authClient) {
+    const auth = authClient || await getAuthClient();
     return google.calendar({ version: 'v3', auth });
 }
 
@@ -111,8 +111,8 @@ function formatEventsForSpeech(events, timeframeLabel) {
  * Fetch events from the primary calendar within a time range.
  * @returns {Array} normalized event objects
  */
-async function getEventsInRange(startISO, endISO) {
-    const calendar = await getCalendarClient();
+async function getEventsInRange(startISO, endISO, authClient) {
+    const calendar = await getCalendarClient(authClient);
     const response = await calendar.events.list({
         calendarId: 'primary',
         timeMin:    startISO,
@@ -138,9 +138,9 @@ async function getUpcomingEvents(days = 1) {
  * @param {{ title, startTime, endTime, description?, attendees?: string[] }}
  * @returns {{ success, eventId?, htmlLink?, error? }}
  */
-async function createEvent({ title, startTime, endTime, description, attendees }) {
+async function createEvent({ title, startTime, endTime, description, attendees }, authClient) {
     try {
-        const calendar = await getCalendarClient();
+        const calendar = await getCalendarClient(authClient);
         const tz       = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
         const eventBody = {
@@ -171,9 +171,9 @@ async function createEvent({ title, startTime, endTime, description, attendees }
  * Delete an event from the primary calendar by its ID.
  * @returns {{ success, error? }}
  */
-async function deleteEvent(eventId) {
+async function deleteEvent(eventId, authClient) {
     try {
-        const calendar = await getCalendarClient();
+        const calendar = await getCalendarClient(authClient);
         await calendar.events.delete({ calendarId: 'primary', eventId });
         console.log('[Calendar] Deleted event:', eventId);
         return { success: true };
@@ -229,15 +229,13 @@ async function findFreeSlots(dateISO, durationMinutes = 60) {
  * @param {Function} logFn - optional, write to the automation-log IPC channel
  * @returns {object} tool call response payload
  */
-async function handleCalendarActionTool(args, logFn) {
+async function handleCalendarActionTool(args, authClient, logFn) {
     const log = logFn || ((msg) => console.log('[Calendar Tool]', msg));
     const { action, time_expression, event_title, duration_minutes = 60, attendees = [], event_id } = args;
 
-    // Guard: never trigger the interactive OAuth browser flow inside the live session.
-    // The user must run `npm run setup-google` first to save a token.
-    if (!isAuthenticated()) {
-        const msg = 'Google Calendar is not connected yet. To use it, open a terminal in the robot-widget folder and run: npm run setup-google — it will open a browser to authorize access. After that, restart Nova and calendar will work.';
-        log('⚠️ [Calendar] Not authenticated — returning auth_required');
+    if (!authClient) {
+        const msg = 'Google Calendar is not connected. Please connect your Google account in Nova settings.';
+        log('⚠️ [Calendar] No auth client provided');
         return { status: 'auth_required', speak: msg, message: msg };
     }
 
@@ -279,7 +277,7 @@ async function handleCalendarActionTool(args, logFn) {
                 label     = 'this week';
             }
 
-            const events  = await getEventsInRange(startISO, endISO);
+            const events  = await getEventsInRange(startISO, endISO, authClient);
             const summary = formatEventsForSpeech(events, label);
             log(`📅 ${summary}`);
             return { status: 'success', events: events.slice(0, 10), speak: summary, message: summary };
@@ -300,20 +298,20 @@ async function handleCalendarActionTool(args, logFn) {
                 if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(attendee)) {
                     resolvedAttendees.push(attendee);
                 } else {
-                    const contact = await searchContacts(attendee).catch(() => null);
+                    const contact = await searchContacts(attendee, authClient).catch(() => null);
                     if (contact) resolvedAttendees.push(contact.email);
                     else log(`⚠️ Could not resolve attendee "${attendee}" — skipping`);
                 }
             }
 
-            const existingEvents = await getEventsInRange(startDT, endDT);
+            const existingEvents = await getEventsInRange(startDT, endDT, authClient);
             let conflictNote = '';
             if (existingEvents.length > 0) {
                 const names = existingEvents.map(e => e.title).join(', ');
                 conflictNote = ` Note: there is already ${existingEvents.length === 1 ? 'an event' : 'events'} at that time: ${names}. Mention this to the user and ask if they still want to proceed.`;
             }
 
-            const result = await createEvent({ title: event_title, startTime: startDT, endTime: endDT, description: '', attendees: resolvedAttendees });
+            const result = await createEvent({ title: event_title, startTime: startDT, endTime: endDT, description: '', attendees: resolvedAttendees }, authClient);
             if (!result.success) {
                 const errMsg = `I couldn't create the event. ${result.error || ''}`;
                 return { status: 'error', message: errMsg, speak: errMsg };
@@ -334,7 +332,7 @@ async function handleCalendarActionTool(args, logFn) {
                     start: new Date().toISOString(),
                     end:   new Date(Date.now() + 2 * 86_400_000).toISOString(),
                 }));
-                const events = await getEventsInRange(range.start, range.end);
+                const events = await getEventsInRange(range.start, range.end, authClient);
                 const match  = events.find(e => e.title.toLowerCase().includes((event_title || '').toLowerCase()));
 
                 if (!match) {
@@ -345,7 +343,7 @@ async function handleCalendarActionTool(args, logFn) {
                 targetTitle = match.title;
             }
 
-            const result = await deleteEvent(targetId);
+            const result = await deleteEvent(targetId, authClient);
             if (!result.success) {
                 const errMsg = `I couldn't cancel ${targetTitle}. ${result.error || ''}`;
                 return { status: 'error', message: errMsg, speak: errMsg };

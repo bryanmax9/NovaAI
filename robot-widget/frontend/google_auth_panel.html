@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Nova — Connect Google Account</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0d1117;
+      color: #e6edf3;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      padding: 28px;
+      gap: 18px;
+    }
+
+    .logo {
+      font-size: 40px;
+      line-height: 1;
+    }
+
+    h1 {
+      font-size: 16px;
+      font-weight: 600;
+      color: #e6edf3;
+      text-align: center;
+    }
+
+    p {
+      font-size: 13px;
+      color: #8b949e;
+      text-align: center;
+      line-height: 1.5;
+      max-width: 300px;
+    }
+
+    #connect-btn {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: #238636;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 22px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    #connect-btn:hover { background: #2ea043; }
+    #connect-btn:disabled { background: #3d444d; cursor: default; }
+
+    #status {
+      font-size: 13px;
+      color: #8b949e;
+      text-align: center;
+      min-height: 18px;
+    }
+    #status.success { color: #3fb950; }
+    #status.error   { color: #f85149; }
+
+    .spinner {
+      display: none;
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="logo">🤖</div>
+  <h1>Connect Your Google Account</h1>
+  <p>Nova needs your Google account to use Gmail, Calendar, and Contacts features.</p>
+
+  <button id="connect-btn">
+    <span id="btn-icon">🔗</span>
+    <span id="btn-text">Connect Google Account</span>
+    <div class="spinner" id="spinner"></div>
+  </button>
+
+  <div id="status"></div>
+
+  <script>
+    const { ipcRenderer } = require('electron');
+    const btn    = document.getElementById('connect-btn');
+    const status = document.getElementById('status');
+    const spinner = document.getElementById('spinner');
+    const btnIcon = document.getElementById('btn-icon');
+    const btnText = document.getElementById('btn-text');
+
+    let polling = false;
+
+    async function startAuth() {
+      btn.disabled = true;
+      btnIcon.style.display = 'none';
+      spinner.style.display = 'block';
+      btnText.textContent = 'Opening Google…';
+      status.textContent = 'A browser window will open for Google sign-in.';
+      status.className = '';
+
+      const result = await ipcRenderer.invoke('google-auth-start');
+
+      if (result.already) {
+        showSuccess();
+        return;
+      }
+      if (result.error) {
+        status.textContent = 'Error: ' + result.error;
+        status.className = 'error';
+        resetBtn();
+        return;
+      }
+
+      // Poll for auth completion
+      status.textContent = 'Waiting for Google sign-in…';
+      polling = true;
+      pollStatus();
+    }
+
+    async function pollStatus() {
+      if (!polling) return;
+      const res = await ipcRenderer.invoke('google-auth-status');
+      if (res.authenticated) {
+        showSuccess();
+      } else {
+        setTimeout(pollStatus, 2000);
+      }
+    }
+
+    function showSuccess() {
+      polling = false;
+      spinner.style.display = 'none';
+      btnIcon.style.display = 'inline';
+      btnIcon.textContent = '✅';
+      btnText.textContent = 'Connected!';
+      btn.style.background = '#238636';
+      status.textContent = 'Google account connected. Nova can now use Gmail, Calendar & Contacts.';
+      status.className = 'success';
+      setTimeout(() => ipcRenderer.send('google-auth-close-panel'), 2500);
+    }
+
+    function resetBtn() {
+      btn.disabled = false;
+      spinner.style.display = 'none';
+      btnIcon.style.display = 'inline';
+      btnIcon.textContent = '🔗';
+      btnText.textContent = 'Connect Google Account';
+    }
+
+    btn.addEventListener('click', startAuth);
+
+    // Auto-check if already authenticated on open
+    (async () => {
+      const res = await ipcRenderer.invoke('google-auth-status');
+      if (res.authenticated) showSuccess();
+    })();
+  </script>
+</body>
+</html>

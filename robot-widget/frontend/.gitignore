@@ -1,0 +1,7 @@
+node_modules/
+.env
+credentials/
+*.log
+vosk-model/
+vosk-model-es/
+macros/

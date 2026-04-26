@@ -4,12 +4,14 @@ const fs              = require('fs');
 const path            = require('path');
 const { google }      = require('googleapis');
 const { GoogleGenAI } = require('@google/genai');
-const { getAuthClient, isAuthenticated } = require('./google_auth.js');
+const { getAuthClient } = require('./google_auth.js');
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-async function getGmailClient() {
-    const auth = await getAuthClient();
+// authClient: per-user OAuth2 client passed from the request (multi-user).
+// Falls back to the global client for local single-user dev.
+async function getGmailClient(authClient) {
+    const auth = authClient || await getAuthClient();
     return google.gmail({ version: 'v1', auth });
 }
 
@@ -18,7 +20,7 @@ async function getGmailClient() {
  * sent mail history. Returns { email, displayName } or null if not found.
  * If the input already looks like an email address, it is returned as-is.
  */
-async function searchContacts(name) {
+async function searchContacts(name, authClient) {
     if (!name) return null;
 
     if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(name.trim())) {
@@ -26,7 +28,7 @@ async function searchContacts(name) {
     }
 
     try {
-        const gmail = await getGmailClient();
+        const gmail = await getGmailClient(authClient);
         const queries = [
             `to:"${name}" in:sent`,
             `from:"${name}"`,
@@ -162,10 +164,10 @@ function phoneticVariants(name) {
  * Returns an array of { displayName, email } objects (may be empty).
  * Falls back to [] on any error so the caller's chain always completes.
  */
-async function searchGoogleContacts(name) {
+async function searchGoogleContacts(name, authClient) {
     try {
-        const authClient = await getAuthClient();
-        const people     = google.people({ version: 'v1', auth: authClient });
+        const auth   = authClient || await getAuthClient();
+        const people = google.people({ version: 'v1', auth });
 
         const seenEmails = new Set();
 
@@ -410,9 +412,9 @@ function buildRawMime({ to, subject, body, attachmentPath }) {
  * @param {{ to: string, subject: string, body: string }}
  * @returns {{ success: boolean, messageId?: string, error?: string }}
  */
-async function sendEmail({ to, subject, body, attachmentPath }) {
+async function sendEmail({ to, subject, body, attachmentPath }, authClient) {
     try {
-        const gmail    = await getGmailClient();
+        const gmail    = await getGmailClient(authClient);
         const response = await gmail.users.messages.send({
             userId: 'me',
             requestBody: { raw: buildRawMime({ to, subject, body, attachmentPath }) },
@@ -430,9 +432,9 @@ async function sendEmail({ to, subject, body, attachmentPath }) {
  * @param {{ to: string, subject: string, body: string }}
  * @returns {{ success: boolean, draftId?: string, error?: string }}
  */
-async function draftEmail({ to, subject, body, attachmentPath }) {
+async function draftEmail({ to, subject, body, attachmentPath }, authClient) {
     try {
-        const gmail    = await getGmailClient();
+        const gmail    = await getGmailClient(authClient);
         const response = await gmail.users.drafts.create({
             userId: 'me',
             requestBody: { message: { raw: buildRawMime({ to, subject, body, attachmentPath }) } },
@@ -485,17 +487,14 @@ async function handleSendEmailTool(
         attachment_path = null,
         confirmed_body  = null,
     },
-    speakFn,
+    authClient,
     logFn
 ) {
     const log = logFn || ((msg) => console.log('[Gmail Tool]', msg));
 
-    if (!isAuthenticated()) {
-        const msg =
-            'Gmail is not connected yet. Open a terminal in the robot-widget folder ' +
-            'and run: npm run setup-google — it will open a browser to authorize access. ' +
-            'After that, restart Nova and email will work.';
-        log('⚠️ [Gmail] Not authenticated');
+    if (!authClient) {
+        const msg = 'Google account not connected. Please connect your Google account in Nova settings.';
+        log('⚠️ [Gmail] No auth client provided');
         return { status: 'auth_required', speak: msg, message: msg };
     }
 
@@ -529,11 +528,11 @@ async function handleSendEmailTool(
             log(`📧 Resolving contact: "${recipient_name}"...`);
 
             // LAYER 1: Google People API (primary source)
-            let allMatches = await searchGoogleContacts(recipient_name);
+            let allMatches = await searchGoogleContacts(recipient_name, authClient);
 
             // LAYER 2: Gmail sent-history fallback
             if (allMatches.length === 0) {
-                const sentMatch = await searchContacts(recipient_name);
+                const sentMatch = await searchContacts(recipient_name, authClient);
                 if (sentMatch && sentMatch.email) {
                     allMatches = [{ email: sentMatch.email, displayName: sentMatch.displayName || recipient_name }];
                 }
@@ -681,8 +680,8 @@ async function handleSendEmailTool(
         const body = finalBody;
         log(`📧 ${draft_only ? 'Drafting' : 'Sending'} to ${resolvedEmail} — "${finalSubject}"${attachment_path ? ` + ${path.basename(attachment_path)}` : ''}`);
         const result = draft_only
-            ? await draftEmail({ to: resolvedEmail, subject: finalSubject, body, attachmentPath: attachment_path })
-            : await sendEmail({ to: resolvedEmail, subject: finalSubject, body, attachmentPath: attachment_path });
+            ? await draftEmail({ to: resolvedEmail, subject: finalSubject, body, attachmentPath: attachment_path }, authClient)
+            : await sendEmail({ to: resolvedEmail, subject: finalSubject, body, attachmentPath: attachment_path }, authClient);
 
         if (!result.success) {
             const errMsg =
@@ -723,10 +722,10 @@ async function handleSendEmailTool(
  * Fetch up to `limit` contacts from Google Contacts (main + other contacts).
  * Returns an array of { displayName, email } sorted alphabetically.
  */
-async function listContacts(limit = 20) {
+async function listContacts(limit = 20, authClient) {
     try {
-        const authClient = await getAuthClient();
-        const people     = google.people({ version: 'v1', auth: authClient });
+        const auth   = authClient || await getAuthClient();
+        const people = google.people({ version: 'v1', auth });
 
         const seenEmails = new Set();
         const contacts   = [];
@@ -780,8 +779,8 @@ async function listContacts(limit = 20) {
 /**
  * Tool handler: returns a spoken/structured list of the user's contacts.
  */
-async function handleListContactsTool({ limit = 10 } = {}) {
-    const contacts = await listContacts(limit);
+async function handleListContactsTool({ limit = 10 } = {}, authClient) {
+    const contacts = await listContacts(limit, authClient);
     if (contacts.length === 0) {
         return {
             status: 'empty',
