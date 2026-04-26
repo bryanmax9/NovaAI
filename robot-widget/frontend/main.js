@@ -15,7 +15,7 @@ const http = require('http');
 const https = require('https');
 const { URL } = require('url');
 const { spawn, exec } = require('child_process');
-const { startLiveSession, sendAudioChunk, sendTextChunk, endLiveSession, setBrowserOpen, setStoreAssistantActive, onDomMapAvailable } = require('./live.js');
+const { startLiveSession, sendAudioChunk, sendTextChunk, sendActivityStart, sendActivityEnd, endLiveSession, setBrowserOpen, setStoreAssistantActive, onDomMapAvailable } = require('./live.js');
 const backendClient = require('./backend_client.js');
 
 // ── Per-user Google token (multi-user Heroku architecture) ────────────────────
@@ -1381,6 +1381,14 @@ ipcMain.on('notes-panel-open-note', (event, title) => {
 
 ipcMain.on('live-text-chunk', (event, text) => {
     sendTextChunk(text);
+});
+
+ipcMain.on('live-activity-start', () => {
+    sendActivityStart();
+});
+
+ipcMain.on('live-activity-end', () => {
+    sendActivityEnd();
 });
 
 ipcMain.on('live-end', (event) => {

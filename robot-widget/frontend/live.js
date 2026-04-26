@@ -1281,6 +1281,14 @@ function sendTextChunk(text) {
     wsSend({ type: 'TEXT_CHUNK', text });
 }
 
+function sendActivityStart() {
+    wsSend({ type: 'ACTIVITY_START' });
+}
+
+function sendActivityEnd() {
+    wsSend({ type: 'ACTIVITY_END' });
+}
+
 function endLiveSession() {
     if (_ws) {
         console.log('[Live] Ending session');
@@ -1312,6 +1320,8 @@ module.exports = {
     startLiveSession,
     sendAudioChunk,
     sendTextChunk,
+    sendActivityStart,
+    sendActivityEnd,
     endLiveSession,
     setBrowserOpen,
     setStoreAssistantActive,

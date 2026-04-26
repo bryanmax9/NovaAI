@@ -8,11 +8,13 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
  * Attach a Gemini Live relay to a WebSocket connection (ws).
  *
  * Protocol — Electron → Backend:
- *   { type: 'SESSION_START', config: { model, systemInstruction, tools, responseModalities } }
- *   { type: 'AUDIO_CHUNK',   data: '<base64 PCM>' }
- *   { type: 'TEXT_CHUNK',    text: '...' }
- *   { type: 'TOOL_RESULT',   callId: '...', functionResponse: {...} }
- *   { type: 'INJECT_TEXT',   text: '...' }
+ *   { type: 'SESSION_START',    config: { model, systemInstruction, tools, responseModalities } }
+ *   { type: 'AUDIO_CHUNK',      data: '<base64 PCM>' }
+ *   { type: 'TEXT_CHUNK',       text: '...' }
+ *   { type: 'ACTIVITY_START' }  — manual VAD: user started speaking
+ *   { type: 'ACTIVITY_END' }    — manual VAD: user stopped speaking → triggers Gemini response
+ *   { type: 'TOOL_RESULT',      callId: '...', functionResponse: {...} }
+ *   { type: 'INJECT_TEXT',      text: '...' }
  *   { type: 'SESSION_END' }
  *
  * Protocol — Backend → Electron:
@@ -53,6 +55,9 @@ function attachLiveProxy(ws) {
                     tools: config.tools,
                     speechConfig: {
                         voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } },
+                    },
+                    realtimeInputConfig: {
+                        automaticActivityDetection: { disabled: true },
                     },
                 },
                 callbacks: {
@@ -156,6 +161,31 @@ function attachLiveProxy(ws) {
                         activeSession.sendRealtimeInput({ text: msg.text });
                     } catch (e) {
                         console.error('[LiveProxy] sendText error:', e.message);
+                    }
+                }
+                break;
+
+            // Manual VAD: tell Gemini the user started speaking.
+            // Requires realtimeInputConfig.automaticActivityDetection.disabled=true.
+            case 'ACTIVITY_START':
+                if (activeSession) {
+                    try {
+                        console.log('[LiveProxy] activityStart → Gemini');
+                        activeSession.sendRealtimeInput({ activityStart: {} });
+                    } catch (e) {
+                        console.error('[LiveProxy] activityStart error:', e.message);
+                    }
+                }
+                break;
+
+            // Manual VAD: tell Gemini the user stopped speaking → triggers response.
+            case 'ACTIVITY_END':
+                if (activeSession) {
+                    try {
+                        console.log('[LiveProxy] activityEnd → Gemini (response expected)');
+                        activeSession.sendRealtimeInput({ activityEnd: {} });
+                    } catch (e) {
+                        console.error('[LiveProxy] activityEnd error:', e.message);
                     }
                 }
                 break;
