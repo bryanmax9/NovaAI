@@ -71,9 +71,8 @@ let _novaPoweredUp = false;
 ipcRenderer.on('live-session-event', (event, status) => {
     if (status.event === 'connected') {
         window.novaState.isLiveActive = true;
-        // Prime Gemini immediately so it doesn't idle-close before the user speaks.
-        // This text triggers a response turn and keeps the session alive.
-        ipcRenderer.send('live-text-chunk', 'Hello! You are Nova, ready and connected. Greet the user warmly in one sentence.');
+        // Silent system init — activates the session turn without triggering audio.
+        ipcRenderer.send('live-text-chunk', '[SYSTEM INIT] Session connected. Stay silent and ready. Do not speak. Wait for the user to address you.');
         if (!_novaPoweredUp) {
             _novaPoweredUp = true;
             if (novaWidget) novaWidget.classList.remove('offline');
@@ -1256,9 +1255,9 @@ async function initOfflineVoice() {
                     }
 
                     // Route out Float32 PCM arrays into 16kHz Int16 for Gemini
-                    // Block audio during research so Nova isn't interrupted by voice commands
-                    // Also block for ECHO_TAIL_MS after TTS ends to prevent acoustic echo from triggering tools
-                    if (!window.novaState.isSpeaking && !window.novaState.isResearching &&
+                    // Only stream audio when the user is awake — silent PCM when idle
+                    // confuses Gemini's VAD and may cause premature session close.
+                    if (window.novaState.isAwake && !window.novaState.isSpeaking && !window.novaState.isResearching &&
                         (Date.now() - _speakingEndedAt > ECHO_TAIL_MS)) {
                         const pcm = new Int16Array(data.length);
                         for (let i = 0; i < data.length; i++) {
