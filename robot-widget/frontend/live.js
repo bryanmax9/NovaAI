@@ -1257,6 +1257,11 @@ function startLiveSession(mainWindow, automation) {
     _ws.on('close', () => {
         console.log('[Live] WebSocket closed');
         _ws = null;
+        // Notify the renderer so isLiveActive resets and auto-reconnect fires.
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('live-session-event', { event: 'closed' });
+            mainWindow.webContents.send('live-session-event-audio', { event: 'closed' });
+        }
     });
 }
 
