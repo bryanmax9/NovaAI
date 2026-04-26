@@ -829,7 +829,8 @@ async function initOfflineVoice() {
         const startRecording = async () => { }; // STUB
         const stopRecording = () => { }; // STUB
 
-        let _activityStartSent = false; // True between activityStart and activityEnd per segment
+        let _lastForwardedAt = 0;        // Timestamp of last text chunk forwarded to Gemini
+        const FORWARD_COOLDOWN_MS = 4000; // Block new forwards for 4s after each forward
 
         const wakeUp = () => {
             stopAllPlayback();
@@ -838,12 +839,6 @@ async function initOfflineVoice() {
 
             // Notify backend wrapper to open ai.live.connect WebSockets!
             ipcRenderer.send('live-start');
-
-            // Signal Gemini that user has started speaking (manual VAD)
-            if (window.novaState.isLiveActive && !_activityStartSent) {
-                _activityStartSent = true;
-                ipcRenderer.send('live-activity-start');
-            }
 
             // If a research paper is still open, re-inject context once the session connects
             injectPaperContextIfNeeded(3500);
@@ -918,12 +913,6 @@ async function initOfflineVoice() {
                         subtitleElement.innerText = "";
                     }
                     uiLog(`Partial (Vosk): "${cleanText}"`);
-                }
-
-                // Signal Gemini that user has started speaking (manual VAD, first partial only)
-                if (window.novaState.isLiveActive && !window.novaState.isSpeaking && !_activityStartSent) {
-                    _activityStartSent = true;
-                    ipcRenderer.send('live-activity-start');
                 }
 
                 clearTimeout(sleepTimer);
@@ -1053,17 +1042,20 @@ async function initOfflineVoice() {
                 }
             }
 
-            // Signal Gemini that user stopped speaking → triggers response using Gemini's own ASR.
-            // This replaces Vosk text forwarding: Gemini processes raw audio (much more accurate
-            // than Vosk transcription which picks up background noise as garbled text).
+            // Forward Vosk transcription to Gemini when user is actively awake.
+            // 4-second cooldown after each forward prevents background noise from
+            // immediately confusing Gemini during multi-step flows like email.
             if (window.novaState.isLiveActive && window.novaState.isAwake && !window.novaState.isSpeaking) {
-                if (!_activityStartSent) {
-                    // activityStart was never sent (e.g. interrupt case) — send both in sequence
-                    ipcRenderer.send('live-activity-start');
+                const words = text.trim().split(/\s+/);
+                const now = Date.now();
+                if (words.length >= 2 && (now - _lastForwardedAt) > FORWARD_COOLDOWN_MS) {
+                    _lastForwardedAt = now;
+                    console.log(`[Live] Forwarding Vosk transcript: "${text.trim()}"`);
+                    ipcRenderer.send('live-text-chunk', text.trim());
+                    return;
+                } else if (words.length >= 2) {
+                    console.log(`[Live] Skipping (cooldown): "${text.trim()}"`);
                 }
-                _activityStartSent = false;
-                console.log(`[Live] activityEnd → Gemini (Vosk segment: "${text.trim()}")`);
-                ipcRenderer.send('live-activity-end');
                 return;
             }
 
@@ -1112,6 +1104,7 @@ async function initOfflineVoice() {
             isPlayingLive = false;
             window.novaState.isSpeaking = false;
             _speakingEndedAt = Date.now(); // start echo-tail gate
+            _lastForwardedAt = 0;          // Gemini finished talking — accept user reply immediately
             listeningSymbol.style.display = 'none';
             if (livePlaybackStuckTimer) { clearTimeout(livePlaybackStuckTimer); livePlaybackStuckTimer = null; }
         }
