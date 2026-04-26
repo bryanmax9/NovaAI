@@ -253,8 +253,6 @@ export default function Home() {
 
   // Early Access Download state
   const [dlRemaining, setDlRemaining] = useState<number | null>(null);
-  const [dlClaiming,  setDlClaiming]  = useState<string | null>(null);
-  const [dlError,     setDlError]     = useState<string | null>(null);
 
   /* Client-only — prevents SSR / browser-extension hydration mismatch on <video> */
   useEffect(() => setMounted(true), []);
@@ -306,23 +304,6 @@ export default function Home() {
       .then(d => setDlRemaining(d.remaining ?? 5))
       .catch(() => setDlRemaining(5));
   }, []);
-
-  async function claimDownload(platform: 'windows' | 'mac' | 'linux') {
-    if (dlRemaining !== null && dlRemaining <= 0) return;
-    setDlClaiming(platform);
-    setDlError(null);
-    try {
-      const res  = await fetch('/api/downloads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ platform }) });
-      const data = await res.json();
-      if (!res.ok) { setDlError(data.error || 'Download unavailable.'); return; }
-      setDlRemaining(data.remaining);
-      window.open(data.url, '_blank');
-    } catch {
-      setDlError('Connection error. Please try again.');
-    } finally {
-      setDlClaiming(null);
-    }
-  }
 
   return (
     <div className="min-h-screen" style={{ background: "#080808", color: "#fff" }}>
@@ -829,108 +810,56 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Error */}
-            {dlError && (
-              <p className="text-center font-inter mb-6" style={{ color: "#f87171", fontSize: 14 }}>{dlError}</p>
-            )}
-
-            {/* Platform cards */}
+            {/* Platform cards — direct download from GitHub Release */}
             <div className={`grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6 ${dlVis ? "anim-up" : "opacity-0"}`} style={{ animationDelay: "160ms" }}>
               {([
                 {
-                  platform: "windows" as const,
                   label: "Windows",
                   sub: "Windows 10 / 11 · 64-bit",
                   badge: ".exe installer",
-                  icon: (
-                    <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801"/>
-                    </svg>
-                  ),
+                  href: "https://github.com/bryanmax9/NovaAI/releases/download/v1.0.0/Nova-Setup.exe",
+                  icon: <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor"><path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801"/></svg>,
                   iconColor: "#4fc3f7",
                 },
                 {
-                  platform: "mac" as const,
                   label: "macOS",
                   sub: "macOS 12+ · Intel & Apple Silicon",
                   badge: ".dmg disk image",
-                  icon: (
-                    <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11"/>
-                    </svg>
-                  ),
+                  href: "https://github.com/bryanmax9/NovaAI/releases/download/v1.0.0/Nova.dmg",
+                  icon: <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11"/></svg>,
                   iconColor: "#e0e0e0",
                 },
                 {
-                  platform: "linux" as const,
                   label: "Linux",
                   sub: "Ubuntu · Arch · Fedora · Any distro",
                   badge: ".AppImage · no install",
-                  icon: (
-                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                      <rect x="2" y="3" width="20" height="14" rx="2"/>
-                      <polyline points="8 21 12 17 16 21"/>
-                      <line x1="12" y1="17" x2="12" y2="21"/>
-                      <polyline points="6 8 9 11 6 14"/>
-                      <line x1="12" y1="14" x2="16" y2="14"/>
-                    </svg>
-                  ),
+                  href: "https://github.com/bryanmax9/NovaAI/releases/download/v1.0.0/Nova-1.0.0.AppImage",
+                  icon: <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><polyline points="8 21 12 17 16 21"/><line x1="12" y1="17" x2="12" y2="21"/><polyline points="6 8 9 11 6 14"/><line x1="12" y1="14" x2="16" y2="14"/></svg>,
                   iconColor: "#fbbf24",
                 },
-              ]).map(({ platform, label, sub, badge, icon, iconColor }) => {
-                const isClaiming = dlClaiming === platform;
-                const isFull     = dlRemaining === 0;
-                return (
-                  <button key={platform} onClick={() => claimDownload(platform)}
-                    disabled={isFull || !!dlClaiming}
-                    className="group text-left rounded-2xl transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed"
-                    style={{
-                      background: "rgba(255,255,255,0.04)",
-                      border: "1px solid rgba(255,255,255,0.12)",
-                      padding: "28px 24px 24px",
-                      cursor: isFull || !!dlClaiming ? "not-allowed" : "pointer",
-                      outline: "none",
-                    }}
-                    onMouseEnter={e => { if (!isFull && !dlClaiming) { (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.08)"; (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.25)"; (e.currentTarget as HTMLElement).style.transform = "translateY(-2px)"; } }}
-                    onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.04)"; (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.12)"; (e.currentTarget as HTMLElement).style.transform = "translateY(0)"; }}
-                  >
-                    {/* Platform icon */}
-                    <div className="mb-5" style={{ color: iconColor }}>{icon}</div>
-
-                    {/* Platform name */}
-                    <h3 className="font-inter font-bold text-white mb-1" style={{ fontSize: 20 }}>{label}</h3>
-                    <p className="font-inter mb-3" style={{ fontSize: 13, color: W45, lineHeight: 1.5 }}>{sub}</p>
-
-                    {/* File type badge */}
-                    <span className="font-inter font-medium px-2.5 py-1 rounded-md mb-6 inline-block"
-                      style={{ fontSize: 11, background: "rgba(255,255,255,0.07)", color: W55, letterSpacing: "0.03em" }}>
-                      {badge}
-                    </span>
-
-                    {/* Download button */}
-                    <div className="mt-4 flex items-center justify-center gap-2 rounded-xl py-3 px-4 font-inter font-semibold transition-all"
-                      style={{
-                        fontSize: 14,
-                        background: isFull ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.12)",
-                        color: isFull ? W30 : W,
-                        border: "1px solid rgba(255,255,255,0.15)",
-                      }}>
-                      {isClaiming ? (
-                        <><span style={{ display: "inline-block", animation: "spin 1s linear infinite" }}>⟳</span>&nbsp;Preparing…</>
-                      ) : isFull ? (
-                        <>Unavailable</>
-                      ) : (
-                        <>
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
-                          </svg>
-                          Download for {label}
-                        </>
-                      )}
-                    </div>
-                  </button>
-                );
-              })}
+              ]).map(({ label, sub, badge, href, icon, iconColor }) => (
+                <a key={label} href={href}
+                  className="block rounded-2xl"
+                  style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.12)", padding: "28px 24px 24px", textDecoration: "none", transition: "background 0.18s, border-color 0.18s, transform 0.18s" }}
+                  onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.08)"; (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.25)"; (e.currentTarget as HTMLElement).style.transform = "translateY(-2px)"; }}
+                  onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.04)"; (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.12)"; (e.currentTarget as HTMLElement).style.transform = "translateY(0)"; }}
+                >
+                  <div className="mb-5" style={{ color: iconColor }}>{icon}</div>
+                  <h3 className="font-inter font-bold text-white mb-1" style={{ fontSize: 20 }}>{label}</h3>
+                  <p className="font-inter mb-3" style={{ fontSize: 13, color: W45, lineHeight: 1.5 }}>{sub}</p>
+                  <span className="font-inter font-medium px-2.5 py-1 rounded-md inline-block mb-5"
+                    style={{ fontSize: 11, background: "rgba(255,255,255,0.07)", color: W55, letterSpacing: "0.03em" }}>
+                    {badge}
+                  </span>
+                  <div className="flex items-center justify-center gap-2 rounded-xl py-3 px-4 font-inter font-semibold"
+                    style={{ fontSize: 14, background: "rgba(255,255,255,0.12)", color: W, border: "1px solid rgba(255,255,255,0.15)" }}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+                    </svg>
+                    Download for {label}
+                  </div>
+                </a>
+              ))}
             </div>
 
             {/* Linux quick-start */}

@@ -2,9 +2,7 @@ import { getStore } from '@netlify/blobs';
 
 const MAX_DOWNLOADS = 8;
 
-const RELEASE_TAG = process.env.RELEASE_TAG || 'v1.0.0';
-const GH           = 'bryanmax9/NovaAI';
-const BASE         = `https://github.com/${GH}/releases/download/${RELEASE_TAG}`;
+const BASE = 'https://github.com/bryanmax9/NovaAI/releases/download/v1.0.0';
 
 const URLS = {
   windows: `${BASE}/Nova-Setup.exe`,
@@ -36,7 +34,7 @@ export async function GET() {
   }
 }
 
-// POST /api/downloads — claim a slot, return download URL
+// POST /api/downloads — kept for future use
 export async function POST(req: Request) {
   let platform: Platform = 'linux';
   try {
@@ -47,21 +45,11 @@ export async function POST(req: Request) {
   try {
     const store = getStore('nova-downloads');
     const used  = await getUsed(store);
-
     if (used >= MAX_DOWNLOADS) {
-      return Response.json(
-        { error: 'All early access slots have been claimed. Join the waitlist!' },
-        { status: 403 }
-      );
+      return Response.json({ error: 'All early access slots have been claimed.' }, { status: 403 });
     }
-
     await store.set('count-v2', JSON.stringify({ count: used + 1 }));
-
-    return Response.json({
-      url:       URLS[platform],
-      remaining: Math.max(0, MAX_DOWNLOADS - (used + 1)),
-      total:     MAX_DOWNLOADS,
-    });
+    return Response.json({ url: URLS[platform], remaining: Math.max(0, MAX_DOWNLOADS - (used + 1)), total: MAX_DOWNLOADS });
   } catch {
     return Response.json({ url: URLS[platform], remaining: MAX_DOWNLOADS, total: MAX_DOWNLOADS });
   }
