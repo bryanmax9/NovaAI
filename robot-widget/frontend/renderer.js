@@ -1043,9 +1043,19 @@ async function initOfflineVoice() {
                 }
             }
 
+            // When Gemini Live is active, forward Vosk transcription as text.
+            // Gemini's audio VAD is unreliable on this model; sendRealtimeInput({text})
+            // is proven to work and consistently triggers audio responses.
+            if (window.novaState.isLiveActive && !window.novaState.isSpeaking) {
+                const words = text.trim().split(/\s+/);
+                if (words.length >= 2) {
+                    console.log(`[Live] Forwarding Vosk transcript: "${text.trim()}"`);
+                    ipcRenderer.send('live-text-chunk', text.trim());
+                    return;
+                }
+            }
+
             if (window.novaState.isAwake) {
-                // We no longer stop recording here; the volume-based silencer handles it!
-                // This prevents "hey nova" from cutting off the actual command.
                 console.log("👂 Vosk segment ended, but keeping Whisper recording active...");
             }
         });
