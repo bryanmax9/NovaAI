@@ -2162,8 +2162,9 @@ ipcMain.handle('generate-speech', async (event, text) => {
     try {
         const base64Audio = await backendClient.generateSpeech(text);
         if (!base64Audio) return null;
-        const wavPath = path.join(__dirname, 'assets', 'tts_output.wav');
-        if (!fs.existsSync(path.join(__dirname, 'assets'))) fs.mkdirSync(path.join(__dirname, 'assets'), { recursive: true });
+        const assetsWriteDir = app.isPackaged ? path.join(app.getPath('userData'), 'assets') : path.join(__dirname, 'assets');
+        if (!fs.existsSync(assetsWriteDir)) fs.mkdirSync(assetsWriteDir, { recursive: true });
+        const wavPath = path.join(assetsWriteDir, 'tts_output.wav');
         fs.writeFileSync(wavPath, Buffer.from(base64Audio, 'base64'));
         return 'assets/tts_output.wav';
     } catch (e) {
@@ -3788,7 +3789,14 @@ app.whenReady().then(() => {
 
         // Remove query string or trailing slashes (Vosk engine appends trailing slashes)
         decodedUrl = decodedUrl.split('?')[0].split('#')[0].replace(/\/+$/, '');
-        const absolutePath = path.join(__dirname, decodedUrl);
+
+        // When packaged, runtime-written files (tts_output.wav etc.) live in userData.
+        // Check there first, then fall back to the app bundle (__dirname).
+        let absolutePath = path.join(__dirname, decodedUrl);
+        if (app.isPackaged) {
+            const userDataPath = path.join(app.getPath('userData'), decodedUrl);
+            if (require('fs').existsSync(userDataPath)) absolutePath = userDataPath;
+        }
 
         try {
             const fs = require('fs');
