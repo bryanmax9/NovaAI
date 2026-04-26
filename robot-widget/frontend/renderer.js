@@ -1052,6 +1052,7 @@ async function initOfflineVoice() {
                     _lastForwardedAt = now;
                     console.log(`[Live] Forwarding Vosk transcript: "${text.trim()}"`);
                     ipcRenderer.send('live-text-chunk', text.trim());
+                    ipcRenderer.send('live-activity-end'); // lets Gemini process this turn
                     return;
                 } else if (words.length >= 2) {
                     console.log(`[Live] Skipping (cooldown): "${text.trim()}"`);
