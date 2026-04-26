@@ -29,13 +29,17 @@ export const metadata: Metadata = {
   },
   description:
     "Nova is the AI-powered productivity assistant that supercharges how you work, learn, and build. Join the waitlist for early access.",
+  icons: {
+    icon: "/NovaLogo.png",
+    apple: "/NovaLogo.png",
+  },
 };
 
 export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <body
         className={`${inter.variable} ${plusJakarta.variable} ${instrumentSerif.variable}`}
       >
