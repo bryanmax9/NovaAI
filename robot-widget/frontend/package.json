@@ -1,10 +1,70 @@
 {
-  "name": "robot-widget",
+  "name": "nova-ai",
+  "productName": "Nova",
   "version": "1.0.0",
-  "description": "Sci-fi worker robot desktop widget",
+  "description": "Nova AI — sci-fi voice assistant powered by Gemini",
   "main": "main.js",
   "scripts": {
-    "start": "electron . --no-sandbox --disable-gpu-sandbox --enable-transparent-visuals --enable-logging --ozone-platform=x11"
+    "start": "electron . --no-sandbox --disable-gpu-sandbox --enable-transparent-visuals --enable-logging --ozone-platform=x11",
+    "build:linux": "electron-builder --linux AppImage --x64",
+    "build:win": "electron-builder --win nsis --x64",
+    "build:mac": "electron-builder --mac dmg --x64 --arm64",
+    "build:all": "electron-builder --linux AppImage --win nsis --mac dmg"
+  },
+  "build": {
+    "appId": "com.nova.ai",
+    "productName": "Nova",
+    "copyright": "Copyright © 2025 Nova AI",
+    "asar": true,
+    "asarUnpack": [
+      "model.tar.gz",
+      "assets/**",
+      "macros/**"
+    ],
+    "files": [
+      "**/*",
+      "!node_modules/electron/dist/**",
+      "!*.log",
+      "!test-*.js",
+      "!clip_gen.py",
+      "!vosk-model/**",
+      "!vosk-model-es/**"
+    ],
+    "extraResources": [],
+    "icon": "assets/novaPreview1.png",
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "icon": "assets/novaPreview1.png",
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "assets/novaPreview1.png",
+      "uninstallerIcon": "assets/novaPreview1.png",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Nova AI"
+    },
+    "mac": {
+      "target": [{ "target": "dmg", "arch": ["x64", "arm64"] }],
+      "icon": "assets/novaPreview1.png",
+      "category": "public.app-category.productivity"
+    },
+    "dmg": {
+      "title": "Nova AI",
+      "icon": "assets/novaPreview1.png"
+    },
+    "linux": {
+      "target": [{ "target": "AppImage", "arch": ["x64"] }],
+      "icon": "assets/novaPreview1.png",
+      "category": "Utility"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "bryanmax9",
+      "repo": "NovaAI"
+    }
   },
   "dependencies": {
     "dotenv": "^17.3.1",
@@ -13,6 +73,7 @@
     "ws": "^8.17.0"
   },
   "devDependencies": {
-    "electron": "^41.2.0"
+    "electron": "^41.2.0",
+    "electron-builder": "^25.1.8"
   }
 }

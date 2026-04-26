@@ -21,7 +21,7 @@ const W15 = "rgba(255,255,255,0.15)";
 const W08 = "rgba(255,255,255,0.08)";
 const W05 = "rgba(255,255,255,0.05)";
 
-const PILL_NAV_LINKS = ["Home", "Features", "Docs", "About"] as const;
+const PILL_NAV_LINKS = ["Home", "Features", "Download", "Docs", "About"] as const;
 const ROLES = ["Voice-first", "Intelligent", "Cross-platform"] as const;
 const LOADING_WORDS = ["Build", "Automate", "Speak"] as const;
 
@@ -251,6 +251,13 @@ export default function Home() {
   const [roleIndex, setRoleIndex] = useState(0);
   const gsapRan = useRef(false);
 
+  // Early Access Download state
+  const [dlRemaining, setDlRemaining] = useState<number | null>(null);
+  const [dlClaiming,  setDlClaiming]  = useState<string | null>(null); // platform being claimed
+  const [dlError,     setDlError]     = useState<string | null>(null);
+  const dlRef = useRef<HTMLElement>(null);
+  const [dlVis, setDlVis] = useState(false);
+
   /* Client-only — prevents SSR / browser-extension hydration mismatch on <video> */
   useEffect(() => setMounted(true), []);
 
@@ -292,6 +299,39 @@ export default function Home() {
   const [vidRef,  vidVis]  = useInView(0.08);
   const [ucRef,   ucVis]   = useInView(0.06);
   const [ctaRef,  ctaVis]  = useInView(0.12);
+
+  // Fetch download slot count on mount
+  useEffect(() => {
+    fetch('/api/downloads')
+      .then(r => r.json())
+      .then(d => setDlRemaining(d.remaining ?? 5))
+      .catch(() => setDlRemaining(5));
+  }, []);
+
+  // Intersection observer for download section
+  useEffect(() => {
+    if (!dlRef.current) return;
+    const io = new IntersectionObserver(([e]) => { if (e.isIntersecting) setDlVis(true); }, { threshold: 0.1 });
+    io.observe(dlRef.current);
+    return () => io.disconnect();
+  }, [mounted]);
+
+  async function claimDownload(platform: 'windows' | 'mac' | 'linux') {
+    if (dlRemaining !== null && dlRemaining <= 0) return;
+    setDlClaiming(platform);
+    setDlError(null);
+    try {
+      const res  = await fetch('/api/downloads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ platform }) });
+      const data = await res.json();
+      if (!res.ok) { setDlError(data.error || 'Download unavailable.'); return; }
+      setDlRemaining(data.remaining);
+      window.open(data.url, '_blank');
+    } catch {
+      setDlError('Connection error. Please try again.');
+    } finally {
+      setDlClaiming(null);
+    }
+  }
 
   return (
     <div className="min-h-screen" style={{ background: "#080808", color: "#fff" }}>
@@ -752,6 +792,95 @@ export default function Home() {
                 );
               })}
             </div>
+          </div>
+        </Wrap>
+      </section>
+
+      {/* ══════════════════════════════════════════════════
+          EARLY ACCESS DOWNLOAD
+      ══════════════════════════════════════════════════ */}
+      <section ref={dlRef as React.RefObject<HTMLDivElement>} id="download" className="relative py-28 sm:py-40">
+        <div className="section-glow" />
+        <Wrap className="relative z-10">
+          <div className="max-w-4xl mx-auto">
+
+            {/* Header */}
+            <div className={`text-center mb-16 ${dlVis ? "anim-up" : "opacity-0"}`}>
+              <Tag>Early Access</Tag>
+              <h2 className="font-inter font-extrabold text-white mt-6 mb-4 leading-tight"
+                style={{ fontSize: "clamp(2rem,5vw,3.5rem)", letterSpacing: "-0.03em" }}>
+                Nova is live on your desktop.
+              </h2>
+              <p className="font-inter" style={{ fontSize: 17, color: W45, maxWidth: 520, margin: "0 auto" }}>
+                Download the app — it connects automatically to the Nova cloud backend.
+                Microphone required. No setup needed.
+              </p>
+            </div>
+
+            {/* Countdown badge */}
+            <div className={`flex justify-center mb-12 ${dlVis ? "anim-up" : "opacity-0"}`} style={{ animationDelay: "100ms" }}>
+              <div className="flex items-center gap-3 px-6 py-3 rounded-full font-inter font-semibold"
+                style={{ background: W08, border: `1px solid ${W15}`, fontSize: 15 }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: dlRemaining === 0 ? "#666" : "#22c55e", display: "inline-block", boxShadow: dlRemaining === 0 ? "none" : "0 0 8px #22c55e" }} />
+                {dlRemaining === null
+                  ? <span style={{ color: W55 }}>Checking availability…</span>
+                  : dlRemaining === 0
+                    ? <span style={{ color: W45 }}>Early access full — join the waitlist</span>
+                    : <span style={{ color: W90 }}><strong style={{ color: W }}>{dlRemaining}</strong> of 5 early access slots remaining</span>
+                }
+              </div>
+            </div>
+
+            {/* Error message */}
+            {dlError && (
+              <p className="text-center font-inter mb-8" style={{ color: "#f87171", fontSize: 14 }}>{dlError}</p>
+            )}
+
+            {/* Platform cards */}
+            <div className={`grid grid-cols-1 sm:grid-cols-3 gap-5 ${dlVis ? "anim-up" : "opacity-0"}`} style={{ animationDelay: "200ms" }}>
+              {([
+                { platform: "windows", label: "Windows", sub: "Windows 10 / 11", note: ".exe installer", icon: "⊞" },
+                { platform: "mac",     label: "macOS",   sub: "macOS 12+",        note: ".dmg  ·  Intel & Apple Silicon", icon: "" },
+                { platform: "linux",   label: "Linux",   sub: "Ubuntu / Arch / Fedora", note: ".AppImage  ·  no install needed", icon: "🐧" },
+              ] as const).map(({ platform, label, sub, note, icon }) => {
+                const isClaiming = dlClaiming === platform;
+                const isFull     = dlRemaining === 0;
+                return (
+                  <button key={platform} onClick={() => claimDownload(platform)} disabled={isFull || !!dlClaiming}
+                    className="group text-left rounded-2xl p-6 transition-all duration-200 hover:scale-[1.02] active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed"
+                    style={{ background: W05, border: `1px solid ${W15}`, cursor: isFull ? "not-allowed" : "pointer" }}>
+                    <div className="text-3xl mb-4">{icon}</div>
+                    <h3 className="font-inter font-bold text-white mb-1" style={{ fontSize: 18 }}>{label}</h3>
+                    <p className="font-inter mb-4" style={{ fontSize: 13, color: W45 }}>{sub}</p>
+                    <p className="font-inter mb-5" style={{ fontSize: 12, color: W30 }}>{note}</p>
+                    <div className="flex items-center gap-2 font-inter font-semibold"
+                      style={{ fontSize: 14, color: isFull ? W30 : W, transition: "color 0.2s" }}>
+                      {isClaiming ? (
+                        <><span className="animate-spin inline-block">⟳</span> Preparing…</>
+                      ) : isFull ? (
+                        <>✕ Unavailable</>
+                      ) : (
+                        <>↓ Download for {label}</>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Linux instructions */}
+            <div className={`mt-10 rounded-xl p-5 ${dlVis ? "anim-up" : "opacity-0"}`}
+              style={{ animationDelay: "300ms", background: W05, border: `1px solid ${W08}` }}>
+              <p className="font-inter font-semibold text-white mb-3" style={{ fontSize: 13 }}>🐧 Linux quick start</p>
+              <pre className="font-mono text-xs overflow-x-auto" style={{ color: W55, lineHeight: 1.8 }}>
+{`chmod +x Nova*.AppImage
+./Nova*.AppImage`}
+              </pre>
+              <p className="font-inter mt-3" style={{ fontSize: 12, color: W30 }}>
+                Requires: microphone + internet. Say <em style={{ color: W45 }}>"Hey Nova"</em> to wake the assistant.
+              </p>
+            </div>
+
           </div>
         </Wrap>
       </section>
