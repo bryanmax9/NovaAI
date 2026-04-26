@@ -1282,6 +1282,28 @@ setTimeout(() => {
     initOfflineVoice();
 }, 2000);
 
+// ── Boot hint — plays while Nova is still dark, tells user how to activate ─
+setTimeout(async () => {
+    try {
+        const audioPath = await ipcRenderer.invoke('generate-speech',
+            "Say Hey Nova to connect.");
+        if (!audioPath) {
+            if ('speechSynthesis' in window) {
+                const utt = new SpeechSynthesisUtterance("Say Hey Nova to connect.");
+                utt.rate = 0.9;
+                window.speechSynthesis.speak(utt);
+            }
+            return;
+        }
+        const audio = new Audio();
+        audio.addEventListener('loadeddata', () => {
+            audio.play().catch(() => {});
+        });
+        audio.src = `appassets:///${audioPath}`;
+        audio.load();
+    } catch (_) {}
+}, 1200);
+
 // ── Welcome on first backend connection ────────────────────────────────────
 // Nova stays dark (offline class) until the first Live session is ready.
 // When SESSION_READY fires, we power up the widget and play the welcome.
