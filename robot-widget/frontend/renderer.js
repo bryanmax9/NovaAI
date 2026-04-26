@@ -1253,9 +1253,9 @@ async function initOfflineVoice() {
                     }
 
                     // Route out Float32 PCM arrays into 16kHz Int16 for Gemini
-                    // Only stream audio when the user is awake — silent PCM when idle
-                    // confuses Gemini's VAD and may cause premature session close.
-                    if (window.novaState.isAwake && !window.novaState.isSpeaking && !window.novaState.isResearching &&
+                    // Stream audio continuously to keep Gemini session alive.
+                    // Vosk text forwarding (gated on isAwake) controls conversation quality.
+                    if (!window.novaState.isSpeaking && !window.novaState.isResearching &&
                         (Date.now() - _speakingEndedAt > ECHO_TAIL_MS)) {
                         const pcm = new Int16Array(data.length);
                         for (let i = 0; i < data.length; i++) {
