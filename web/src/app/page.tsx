@@ -792,66 +792,136 @@ export default function Home() {
       ══════════════════════════════════════════════════ */}
       <section ref={dlRef} id="download" className="relative py-28 sm:py-40">
         <div className="section-glow" />
+        {/* Strong top border to visually separate this section */}
+        <div className="absolute top-0 left-0 right-0 h-px" style={{ background: `linear-gradient(90deg, transparent, ${W30}, transparent)` }} />
+
         <Wrap className="relative z-10">
-          <div className="max-w-4xl mx-auto">
+          <div className="max-w-5xl mx-auto">
 
             {/* Header */}
-            <div className={`text-center mb-16 ${dlVis ? "anim-up" : "opacity-0"}`}>
-              <Tag>Early Access</Tag>
-              <h2 className="font-inter font-extrabold text-white mt-6 mb-4 leading-tight"
-                style={{ fontSize: "clamp(2rem,5vw,3.5rem)", letterSpacing: "-0.03em" }}>
-                Nova is live on your desktop.
+            <div className={`text-center mb-10 ${dlVis ? "anim-up" : "opacity-0"}`}>
+              <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full mb-6 font-inter font-semibold"
+                style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.18)", fontSize: 12, letterSpacing: "0.12em", color: W90, textTransform: "uppercase" }}>
+                <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#22c55e", display: "inline-block", boxShadow: "0 0 6px #22c55e" }} />
+                Download Available
+              </div>
+              <h2 className="font-inter font-extrabold text-white mb-5 leading-tight"
+                style={{ fontSize: "clamp(2.2rem,5vw,4rem)", letterSpacing: "-0.03em" }}>
+                Get Nova on your desktop
               </h2>
-              <p className="font-inter" style={{ fontSize: 17, color: W45, maxWidth: 520, margin: "0 auto" }}>
-                Download the app — it connects automatically to the Nova cloud backend.
-                Microphone required. No setup needed.
+              <p className="font-inter mx-auto" style={{ fontSize: 17, color: W45, maxWidth: 500, lineHeight: 1.7 }}>
+                One download. Connects automatically to Nova&apos;s cloud brain.
+                Just speak — no configuration needed.
               </p>
             </div>
 
-            {/* Countdown badge */}
-            <div className={`flex justify-center mb-12 ${dlVis ? "anim-up" : "opacity-0"}`} style={{ animationDelay: "100ms" }}>
-              <div className="flex items-center gap-3 px-6 py-3 rounded-full font-inter font-semibold"
-                style={{ background: W08, border: `1px solid ${W15}`, fontSize: 15 }}>
-                <span style={{ width: 8, height: 8, borderRadius: "50%", background: dlRemaining === 0 ? "#666" : "#22c55e", display: "inline-block", boxShadow: dlRemaining === 0 ? "none" : "0 0 8px #22c55e" }} />
+            {/* Slots counter */}
+            <div className={`flex justify-center mb-12 ${dlVis ? "anim-up" : "opacity-0"}`} style={{ animationDelay: "80ms" }}>
+              <div className="flex items-center gap-3 px-5 py-2.5 rounded-full font-inter"
+                style={{ background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.25)", fontSize: 14 }}>
+                <span style={{ width: 7, height: 7, borderRadius: "50%", background: dlRemaining === 0 ? "#555" : "#22c55e", display: "inline-block", boxShadow: dlRemaining === 0 ? "none" : "0 0 8px #22c55e80", flexShrink: 0 }} />
                 {dlRemaining === null
-                  ? <span style={{ color: W55 }}>Checking availability…</span>
+                  ? <span style={{ color: W45 }}>Checking availability…</span>
                   : dlRemaining === 0
-                    ? <span style={{ color: W45 }}>Early access full — join the waitlist</span>
-                    : <span style={{ color: W90 }}><strong style={{ color: W }}>{dlRemaining}</strong> of 5 early access slots remaining</span>
+                    ? <span style={{ color: W45 }}>Early access is full — join the waitlist below</span>
+                    : <span style={{ color: "#86efac" }}><strong style={{ color: "#4ade80" }}>{dlRemaining}</strong>&nbsp;of 5 early access slots remaining</span>
                 }
               </div>
             </div>
 
-            {/* Error message */}
+            {/* Error */}
             {dlError && (
-              <p className="text-center font-inter mb-8" style={{ color: "#f87171", fontSize: 14 }}>{dlError}</p>
+              <p className="text-center font-inter mb-6" style={{ color: "#f87171", fontSize: 14 }}>{dlError}</p>
             )}
 
             {/* Platform cards */}
-            <div className={`grid grid-cols-1 sm:grid-cols-3 gap-5 ${dlVis ? "anim-up" : "opacity-0"}`} style={{ animationDelay: "200ms" }}>
+            <div className={`grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6 ${dlVis ? "anim-up" : "opacity-0"}`} style={{ animationDelay: "160ms" }}>
               {([
-                { platform: "windows", label: "Windows", sub: "Windows 10 / 11", note: ".exe installer", icon: "⊞" },
-                { platform: "mac",     label: "macOS",   sub: "macOS 12+",        note: ".dmg  ·  Intel & Apple Silicon", icon: "" },
-                { platform: "linux",   label: "Linux",   sub: "Ubuntu / Arch / Fedora", note: ".AppImage  ·  no install needed", icon: "🐧" },
-              ] as const).map(({ platform, label, sub, note, icon }) => {
+                {
+                  platform: "windows" as const,
+                  label: "Windows",
+                  sub: "Windows 10 / 11 · 64-bit",
+                  badge: ".exe installer",
+                  icon: (
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801"/>
+                    </svg>
+                  ),
+                  iconColor: "#4fc3f7",
+                },
+                {
+                  platform: "mac" as const,
+                  label: "macOS",
+                  sub: "macOS 12+ · Intel & Apple Silicon",
+                  badge: ".dmg disk image",
+                  icon: (
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11"/>
+                    </svg>
+                  ),
+                  iconColor: "#e0e0e0",
+                },
+                {
+                  platform: "linux" as const,
+                  label: "Linux",
+                  sub: "Ubuntu · Arch · Fedora · Any distro",
+                  badge: ".AppImage · no install",
+                  icon: (
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M12.504 0c-.155 0-.315.008-.48.021-4.226.333-3.105 4.807-3.17 6.298-.076 1.092-.3 1.953-1.05 3.02-.885 1.051-2.127 2.75-2.716 4.521-.278.832-.41 1.684-.287 2.489a.424.424 0 00-.11.135c-.26.268-.45.6-.663.839-.199.199-.485.267-.797.4-.313.136-.658.269-.864.68-.09.189-.136.394-.132.602 0 .199.027.4.055.536.058.399.116.728.04.97-.249.68-.28 1.145-.106 1.484.174.334.535.47.94.601.81.2 1.91.135 2.774.6.926.466 1.866.67 2.616.47.526-.132.97-.514 1.27-1.069.Xf.217.49.404.793.601.2.14.394.271.548.433.154.162.107.406-.001.553-.249.282.18.577.374.819.063.076.127.136.198.181.098.059.196.069.294.069.098 0 .196-.01.294-.069a.4.4 0 00.198-.181c.194-.242.623-.537.374-.819-.108-.147-.155-.391-.001-.553.154-.162.348-.293.548-.433.303-.197.576-.384.793-.601.3.555.744.937 1.27 1.069.75.2 1.69-.004 2.616-.47.864-.465 1.964-.4 2.774-.6.405-.131.766-.267.94-.601.174-.339.143-.804-.106-1.484-.076-.242-.018-.571.04-.97.028-.136.055-.337.055-.536a1.27 1.27 0 00-.132-.602c-.206-.411-.551-.544-.864-.68-.312-.133-.598-.201-.797-.4-.213-.239-.403-.571-.663-.839a.424.424 0 00-.11-.135c.123-.805-.009-1.657-.287-2.489-.589-1.771-1.831-3.47-2.716-4.521-.75-1.067-.974-1.928-1.05-3.02-.065-1.491 1.056-5.965-3.17-6.298-.165-.013-.325-.021-.48-.021z"/>
+                    </svg>
+                  ),
+                  iconColor: "#fbbf24",
+                },
+              ]).map(({ platform, label, sub, badge, icon, iconColor }) => {
                 const isClaiming = dlClaiming === platform;
                 const isFull     = dlRemaining === 0;
                 return (
-                  <button key={platform} onClick={() => claimDownload(platform)} disabled={isFull || !!dlClaiming}
-                    className="group text-left rounded-2xl p-6 transition-all duration-200 hover:scale-[1.02] active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed"
-                    style={{ background: W05, border: `1px solid ${W15}`, cursor: isFull ? "not-allowed" : "pointer" }}>
-                    <div className="text-3xl mb-4">{icon}</div>
-                    <h3 className="font-inter font-bold text-white mb-1" style={{ fontSize: 18 }}>{label}</h3>
-                    <p className="font-inter mb-4" style={{ fontSize: 13, color: W45 }}>{sub}</p>
-                    <p className="font-inter mb-5" style={{ fontSize: 12, color: W30 }}>{note}</p>
-                    <div className="flex items-center gap-2 font-inter font-semibold"
-                      style={{ fontSize: 14, color: isFull ? W30 : W, transition: "color 0.2s" }}>
+                  <button key={platform} onClick={() => claimDownload(platform)}
+                    disabled={isFull || !!dlClaiming}
+                    className="group text-left rounded-2xl transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                    style={{
+                      background: "rgba(255,255,255,0.04)",
+                      border: "1px solid rgba(255,255,255,0.12)",
+                      padding: "28px 24px 24px",
+                      cursor: isFull || !!dlClaiming ? "not-allowed" : "pointer",
+                      outline: "none",
+                    }}
+                    onMouseEnter={e => { if (!isFull && !dlClaiming) { (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.08)"; (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.25)"; (e.currentTarget as HTMLElement).style.transform = "translateY(-2px)"; } }}
+                    onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.04)"; (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.12)"; (e.currentTarget as HTMLElement).style.transform = "translateY(0)"; }}
+                  >
+                    {/* Platform icon */}
+                    <div className="mb-5" style={{ color: iconColor }}>{icon}</div>
+
+                    {/* Platform name */}
+                    <h3 className="font-inter font-bold text-white mb-1" style={{ fontSize: 20 }}>{label}</h3>
+                    <p className="font-inter mb-3" style={{ fontSize: 13, color: W45, lineHeight: 1.5 }}>{sub}</p>
+
+                    {/* File type badge */}
+                    <span className="font-inter font-medium px-2.5 py-1 rounded-md mb-6 inline-block"
+                      style={{ fontSize: 11, background: "rgba(255,255,255,0.07)", color: W55, letterSpacing: "0.03em" }}>
+                      {badge}
+                    </span>
+
+                    {/* Download button */}
+                    <div className="mt-4 flex items-center justify-center gap-2 rounded-xl py-3 px-4 font-inter font-semibold transition-all"
+                      style={{
+                        fontSize: 14,
+                        background: isFull ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.12)",
+                        color: isFull ? W30 : W,
+                        border: "1px solid rgba(255,255,255,0.15)",
+                      }}>
                       {isClaiming ? (
-                        <><span className="animate-spin inline-block">⟳</span> Preparing…</>
+                        <><span style={{ display: "inline-block", animation: "spin 1s linear infinite" }}>⟳</span>&nbsp;Preparing…</>
                       ) : isFull ? (
-                        <>✕ Unavailable</>
+                        <>Unavailable</>
                       ) : (
-                        <>↓ Download for {label}</>
+                        <>
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+                          </svg>
+                          Download for {label}
+                        </>
                       )}
                     </div>
                   </button>
@@ -859,16 +929,21 @@ export default function Home() {
               })}
             </div>
 
-            {/* Linux instructions */}
-            <div className={`mt-10 rounded-xl p-5 ${dlVis ? "anim-up" : "opacity-0"}`}
-              style={{ animationDelay: "300ms", background: W05, border: `1px solid ${W08}` }}>
-              <p className="font-inter font-semibold text-white mb-3" style={{ fontSize: 13 }}>🐧 Linux quick start</p>
-              <pre className="font-mono text-xs overflow-x-auto" style={{ color: W55, lineHeight: 1.8 }}>
+            {/* Linux quick-start */}
+            <div className={`rounded-xl px-6 py-5 ${dlVis ? "anim-up" : "opacity-0"}`}
+              style={{ animationDelay: "240ms", background: "rgba(251,191,36,0.04)", border: "1px solid rgba(251,191,36,0.15)" }}>
+              <div className="flex items-center gap-2 mb-3">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
+                </svg>
+                <span className="font-inter font-semibold" style={{ fontSize: 13, color: "#fbbf24" }}>Linux — make it executable first</span>
+              </div>
+              <pre className="font-mono overflow-x-auto" style={{ fontSize: 13, color: W55, lineHeight: 2 }}>
 {`chmod +x Nova*.AppImage
 ./Nova*.AppImage`}
               </pre>
-              <p className="font-inter mt-3" style={{ fontSize: 12, color: W30 }}>
-                Requires: microphone + internet. Say <em style={{ color: W45 }}>"Hey Nova"</em> to wake the assistant.
+              <p className="font-inter mt-2" style={{ fontSize: 12, color: W30 }}>
+                Requires microphone access + internet. Say <em style={{ color: W45 }}>&quot;Hey Nova&quot;</em> to wake the assistant.
               </p>
             </div>
 
