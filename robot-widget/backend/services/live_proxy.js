@@ -41,6 +41,9 @@ function attachLiveProxy(ws) {
         const model = config.model || 'gemini-3.1-flash-live-preview';
         console.log(`[LiveProxy] Connecting to Gemini Live model=${model}`);
 
+        let audioChunksReceived = 0;
+        let msgCount = 0;
+
         try {
             activeSession = await ai.live.connect({
                 model,
@@ -48,19 +51,45 @@ function attachLiveProxy(ws) {
                     responseModalities: config.responseModalities || [Modality.AUDIO],
                     systemInstruction: config.systemInstruction,
                     tools: config.tools,
+                    speechConfig: {
+                        voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } },
+                    },
+                    realtimeInputConfig: {
+                        automaticActivityDetection: {
+                            disabled: false,
+                            startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
+                            endOfSpeechSensitivity: 'END_SENSITIVITY_LOW',
+                            prefixPaddingMs: 20,
+                            silenceDurationMs: 500,
+                        },
+                    },
                 },
                 callbacks: {
                     onmessage: (message) => {
+                        msgCount++;
+                        const keys = Object.keys(message).filter(k => message[k] != null && typeof message[k] !== 'function');
+                        if (msgCount <= 10 || msgCount % 50 === 0) {
+                            console.log(`[LiveProxy] Gemini msg #${msgCount} keys: ${keys.join(', ')}`);
+                        }
+
                         // Audio / text responses
                         if (message.serverContent?.modelTurn?.parts) {
                             for (const part of message.serverContent.modelTurn.parts) {
                                 if (part.inlineData?.data) {
+                                    audioChunksReceived++;
+                                    if (audioChunksReceived <= 3) console.log(`[LiveProxy] Audio chunk #${audioChunksReceived} received from Gemini`);
                                     send({ type: 'AUDIO_RESPONSE', data: part.inlineData.data });
                                 }
                                 if (part.text) {
+                                    console.log(`[LiveProxy] Text from Gemini: ${part.text.slice(0, 80)}`);
                                     send({ type: 'TEXT_RESPONSE', text: part.text });
                                 }
                             }
+                        }
+
+                        if (message.serverContent?.turnComplete) {
+                            console.log(`[LiveProxy] Turn complete. Audio chunks this turn: ${audioChunksReceived}`);
+                            audioChunksReceived = 0;
                         }
 
                         // Tool calls — forward to Electron to execute
@@ -113,7 +142,7 @@ function attachLiveProxy(ws) {
                 await startSession(msg.config || {});
                 break;
 
-            case 'AUDIO_CHUNK':
+            case 'AUDIO_CHUNK': {
                 if (activeSession && msg.data) {
                     try {
                         activeSession.sendRealtimeInput({
@@ -122,8 +151,11 @@ function attachLiveProxy(ws) {
                     } catch (e) {
                         console.error('[LiveProxy] sendAudio error:', e.message);
                     }
+                } else if (!activeSession) {
+                    console.warn('[LiveProxy] AUDIO_CHUNK received but no active session');
                 }
                 break;
+            }
 
             // Text chunks use sendClientContent (ordered turns), not sendRealtimeInput.
             case 'TEXT_CHUNK':
