@@ -253,10 +253,8 @@ export default function Home() {
 
   // Early Access Download state
   const [dlRemaining, setDlRemaining] = useState<number | null>(null);
-  const [dlClaiming,  setDlClaiming]  = useState<string | null>(null); // platform being claimed
+  const [dlClaiming,  setDlClaiming]  = useState<string | null>(null);
   const [dlError,     setDlError]     = useState<string | null>(null);
-  const dlRef = useRef<HTMLElement>(null);
-  const [dlVis, setDlVis] = useState(false);
 
   /* Client-only — prevents SSR / browser-extension hydration mismatch on <video> */
   useEffect(() => setMounted(true), []);
@@ -299,6 +297,7 @@ export default function Home() {
   const [vidRef,  vidVis]  = useInView(0.08);
   const [ucRef,   ucVis]   = useInView(0.06);
   const [ctaRef,  ctaVis]  = useInView(0.12);
+  const [dlRef,   dlVis]   = useInView(0.08);
 
   // Fetch download slot count on mount
   useEffect(() => {
@@ -307,14 +306,6 @@ export default function Home() {
       .then(d => setDlRemaining(d.remaining ?? 5))
       .catch(() => setDlRemaining(5));
   }, []);
-
-  // Intersection observer for download section
-  useEffect(() => {
-    if (!dlRef.current) return;
-    const io = new IntersectionObserver(([e]) => { if (e.isIntersecting) setDlVis(true); }, { threshold: 0.1 });
-    io.observe(dlRef.current);
-    return () => io.disconnect();
-  }, [mounted]);
 
   async function claimDownload(platform: 'windows' | 'mac' | 'linux') {
     if (dlRemaining !== null && dlRemaining <= 0) return;
@@ -799,7 +790,7 @@ export default function Home() {
       {/* ══════════════════════════════════════════════════
           EARLY ACCESS DOWNLOAD
       ══════════════════════════════════════════════════ */}
-      <section ref={dlRef as React.RefObject<HTMLDivElement>} id="download" className="relative py-28 sm:py-40">
+      <section ref={dlRef} id="download" className="relative py-28 sm:py-40">
         <div className="section-glow" />
         <Wrap className="relative z-10">
           <div className="max-w-4xl mx-auto">
