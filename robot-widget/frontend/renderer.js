@@ -1317,6 +1317,9 @@ async function _playWelcome() {
             audio.play().catch(err => console.error('[Nova Welcome] play() failed:', err));
         });
         audio.addEventListener('ended', () => {
+            // After welcome plays, send a silent text prompt to prime Gemini's VAD.
+            // Without this, Gemini may ignore the first few seconds of voice audio.
+            ipcRenderer.send('live-text-chunk', '[SYSTEM] Nova is now online and ready. Greet the user warmly and wait for them to speak.');
             ipcRenderer.invoke('google-auth-status').then(res => {
                 if (!res.authenticated) ipcRenderer.send('google-auth-open-panel');
             }).catch(() => {});

@@ -54,15 +54,6 @@ function attachLiveProxy(ws) {
                     speechConfig: {
                         voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } },
                     },
-                    realtimeInputConfig: {
-                        automaticActivityDetection: {
-                            disabled: false,
-                            startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
-                            endOfSpeechSensitivity: 'END_SENSITIVITY_LOW',
-                            prefixPaddingMs: 20,
-                            silenceDurationMs: 500,
-                        },
-                    },
                 },
                 callbacks: {
                     onmessage: (message) => {
