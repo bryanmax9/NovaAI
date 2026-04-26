@@ -14,15 +14,24 @@ const URLS = {
 
 type Platform = keyof typeof URLS;
 
+async function getUsed(store: ReturnType<typeof getStore>): Promise<number> {
+  try {
+    const raw = await store.get('count');
+    if (!raw) return 0;
+    const parsed = JSON.parse(raw);
+    return typeof parsed?.count === 'number' ? parsed.count : 0;
+  } catch {
+    return 0;
+  }
+}
+
 // GET /api/downloads — returns remaining slot count
 export async function GET() {
   try {
     const store = getStore('nova-downloads');
-    const data  = await store.get('count', { type: 'json' }).catch(() => null) as { count: number } | null;
-    const used  = data?.count ?? 0;
+    const used  = await getUsed(store);
     return Response.json({ remaining: Math.max(0, MAX_DOWNLOADS - used), total: MAX_DOWNLOADS });
   } catch {
-    // Fallback when Blobs aren't available (local dev)
     return Response.json({ remaining: MAX_DOWNLOADS, total: MAX_DOWNLOADS });
   }
 }
@@ -37,8 +46,7 @@ export async function POST(req: Request) {
 
   try {
     const store = getStore('nova-downloads');
-    const data  = await store.get('count', { type: 'json' }).catch(() => null) as { count: number } | null;
-    const used  = data?.count ?? 0;
+    const used  = await getUsed(store);
 
     if (used >= MAX_DOWNLOADS) {
       return Response.json(
@@ -47,7 +55,7 @@ export async function POST(req: Request) {
       );
     }
 
-    await store.set('count', { count: used + 1 });
+    await store.set('count', JSON.stringify({ count: used + 1 }));
 
     return Response.json({
       url:       URLS[platform],
@@ -55,7 +63,6 @@ export async function POST(req: Request) {
       total:     MAX_DOWNLOADS,
     });
   } catch {
-    // Fallback: return URL directly when Blobs aren't available (local dev)
     return Response.json({ url: URLS[platform], remaining: MAX_DOWNLOADS, total: MAX_DOWNLOADS });
   }
 }
